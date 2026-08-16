@@ -35,6 +35,12 @@ _testmain.go
 /.temp/
 /.tmp/
 .hz
+
+# 本地项目文档和测试代码不提交到远程仓库
+/docs/
+*_test.go
+/script/migrations/README.md
+/swallow-go-代码审查与实施清单.md
 *.local.yml
 dumped_hertz_remote_config.json
 

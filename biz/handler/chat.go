@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/swallow-sun/swallow-go/internal/agent"
+	"github.com/swallow-sun/swallow-go/internal/provider/llm"
 	"github.com/swallow-sun/swallow-go/internal/trace"
 	"github.com/swallow-sun/swallow-go/pkg/logger"
 	"go.uber.org/zap"
@@ -31,9 +32,13 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	// session_id 和 message 都是必填，缺一个就返回 400
-	if req.SessionID == "" || req.Message == "" {
-		c.JSON(consts.StatusBadRequest, map[string]string{"error": "session_id and message are required"})
+	// client_message_id 由客户端生成；同一条消息重试时必须保持不变。
+	if req.SessionID == "" || req.ClientMessageID == "" || req.Message == "" {
+		c.JSON(consts.StatusBadRequest, map[string]string{"error": "session_id, client_message_id and message are required"})
+		return
+	}
+	if len(req.ClientMessageID) > maxClientMessageIDLength {
+		c.JSON(consts.StatusBadRequest, map[string]string{"error": "client_message_id is too long"})
 		return
 	}
 
@@ -46,6 +51,25 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	// 整轮聊天共用同一个超时上下文和 trace ID。
+	chatCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	chatCtx, traceID := trace.Ensure(chatCtx)
+
+	// 在调用模型前原子占用幂等键。若记录已经存在，绝不能再次调用模型。
+	chatRequest, created, err := d.repo.BeginChatRequest(
+		chatCtx, req.ClientMessageID, session.ID, session.UserID, traceID,
+	)
+	if err != nil {
+		logger.Error("创建聊天请求记录失败", zap.Error(err), zap.String("trace_id", traceID))
+		c.JSON(consts.StatusInternalServerError, map[string]string{"error": "chat request init failed"})
+		return
+	}
+	if !created {
+		d.handleExistingChatRequest(chatCtx, c, chatRequest)
+		return
+	}
+
 	// 每个请求动态创建 Agent（sessionID/userID 不同不能复用）。
 	// Agent 里面绑定了当前会话的 ID 和用户 ID，所以不能跨请求共用。
 	// NewWithDB 传入：LLM 客户端、模型名、系统提示词文件路径、记忆存储、会话 ID、用户 ID
@@ -54,30 +78,21 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 		d.mem, session.ID, session.UserID,
 	)
 	if err != nil {
+		d.failChatRequest(chatRequest.ID, traceID, chatErrorAgentInit)
 		logger.Error("创建 Agent 失败", zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, map[string]string{"error": "agent init failed"})
 		return
 	}
 
-	// 给这次对话设一个 60 秒超时。
-	// 60 秒内 LLM 没回完就强制取消，防止客户端无限等待。
-	// context.WithTimeout 返回一个新的 context 和一个取消函数
-	chatCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	// defer cancel() 保证函数退出时释放超时 context 占的资源
-	defer cancel()
-
 	// 调 Agent 的流式对话方法，拿到一个 streamReader（流式读取器）。
 	// streamReader 可以一个 chunk 一个 chunk 地读取 LLM 的回复
 	streamReader, err := ag.ChatStream(chatCtx, req.Message)
 	if err != nil {
+		d.failChatRequest(chatRequest.ID, traceID, chatErrorConnect)
 		logger.Error("LLM 流式调用失败", zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, map[string]string{"error": "llm call failed"})
 		return
 	}
-
-	// 从 streamReader 里掏出这次调用的 trace ID。
-	// 流式结束后保存回复要用同一个 trace ID，保证整条链路可追踪
-	traceID := agent.GetTraceID(streamReader)
 
 	// 无论后续正常结束还是发生错误，都关闭 LLM 响应体。
 	// defer 保证函数退出时执行，类似 telemetry.go 里的 defer logger.Sync()
@@ -91,6 +106,21 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 			)
 		}
 	}()
+
+	// ChatStream 连接模型成功后已经保存用户消息，将其关联到幂等请求并标记运行中。
+	userDialogue, err := d.repo.GetDialogueByTraceAndRole(chatCtx, traceID, string(llm.RoleUser))
+	if err != nil {
+		d.failChatRequest(chatRequest.ID, traceID, chatErrorUserMissing)
+		logger.Error("读取已保存用户消息失败", zap.Error(err), zap.String("trace_id", traceID))
+		c.JSON(consts.StatusInternalServerError, map[string]string{"error": "user message state failed"})
+		return
+	}
+	if err := d.repo.MarkChatRequestRunning(chatCtx, chatRequest.ID, userDialogue.ID); err != nil {
+		d.failChatRequest(chatRequest.ID, traceID, chatErrorRequestState)
+		logger.Error("更新聊天请求运行状态失败", zap.Error(err), zap.String("trace_id", traceID))
+		c.JSON(consts.StatusInternalServerError, map[string]string{"error": "chat request state failed"})
+		return
+	}
 
 	// 设置标准 SSE 响应头，告诉浏览器/客户端"我要流式推数据了"。
 	// 调用 writeSSE 前只需要执行一次
@@ -111,6 +141,7 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 
 		// 读取出错了
 		if err != nil {
+			d.failChatRequest(chatRequest.ID, traceID, chatErrorStreamRead)
 			logger.Error(
 				"读取 LLM 流失败",
 				zap.Error(err),
@@ -155,6 +186,7 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 				"content": chunk,
 			},
 		); err != nil {
+			d.failChatRequest(chatRequest.ID, traceID, chatErrorClientClosed)
 			// 发送失败了，通常表示客户端已经断开连接。
 			// 打日志后直接 return，不用再发了
 			logger.Error(
@@ -190,6 +222,7 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 		usage,                 // token 用量
 		metrics,               // 性能指标
 	); err != nil {
+		d.failChatRequest(chatRequest.ID, traceID, chatErrorAssistantSave)
 		logger.Error(
 			"保存助手回复失败",
 			zap.Error(err),
@@ -214,6 +247,23 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	// 助手消息已经持久化后再完成幂等请求。两步间若进程中断，重试路径会按 trace 恢复状态。
+	assistantDialogue, err := d.repo.GetDialogueByTraceAndRole(finishCtx, traceID, string(llm.RoleAssistant))
+	if err != nil {
+		logger.Error("读取已保存助手消息失败", zap.Error(err), zap.String("trace_id", traceID))
+		if writeErr := writeSSE(c, "error", map[string]string{"message": "assistant result state failed"}); writeErr != nil {
+			logger.Error("发送 SSE 错误事件失败", zap.Error(writeErr), zap.String("trace_id", traceID))
+		}
+		return
+	}
+	if err := d.repo.CompleteChatRequest(finishCtx, chatRequest.ID, assistantDialogue.ID); err != nil {
+		logger.Error("完成聊天请求状态失败", zap.Error(err), zap.String("trace_id", traceID))
+		if writeErr := writeSSE(c, "error", map[string]string{"message": "chat request completion failed"}); writeErr != nil {
+			logger.Error("发送 SSE 错误事件失败", zap.Error(writeErr), zap.String("trace_id", traceID))
+		}
+		return
+	}
+
 	// 刷新会话最后活跃时间（更新数据库 sessions 表的 updated_at）
 	d.idm.TouchSession(finishCtx, session.ID)
 
@@ -223,14 +273,14 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 		c,
 		"usage",
 		map[string]any{
-			"prompt_tokens":     usage.PromptTokens,                       // 输入 token 数
-			"completion_tokens": usage.CompletionTokens,                   // 输出 token 数
-			"cache_hit_tokens":  usage.CacheHitTokens(),                   // 缓存命中的 token 数
-			"cache_miss_tokens": usage.CacheMissTokens(),                  // 缓存未命中的 token 数
+			"prompt_tokens":     usage.PromptTokens,                            // 输入 token 数
+			"completion_tokens": usage.CompletionTokens,                        // 输出 token 数
+			"cache_hit_tokens":  usage.CacheHitTokens(),                        // 缓存命中的 token 数
+			"cache_miss_tokens": usage.CacheMissTokens(),                       // 缓存未命中的 token 数
 			"reasoning_tokens":  usage.CompletionTokensDetails.ReasoningTokens, // 推理 token 数（思维链）
-			"total_tokens":      usage.TotalTokens,                        // 总 token 数
-			"first_token_ms":    metrics.FirstTokenMs,                     // 首 token 耗时（毫秒）
-			"total_duration_ms": metrics.TotalDurationMs,                  // 总耗时（毫秒）
+			"total_tokens":      usage.TotalTokens,                             // 总 token 数
+			"first_token_ms":    metrics.FirstTokenMs,                          // 首 token 耗时（毫秒）
+			"total_duration_ms": metrics.TotalDurationMs,                       // 总耗时（毫秒）
 		},
 	); err != nil {
 		logger.Error(

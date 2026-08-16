@@ -19,6 +19,8 @@ func (ormDialogue) TableName() string { return "dialogues" }
 
 func (ormEvent) TableName() string { return "events" }
 
+func (ormChatRequest) TableName() string { return "chat_requests" }
+
 // CreateUser 新增用户，并返回数据库生成的 ID 和时间字段。
 func (r *sqliteRepo) CreateUser(ctx context.Context, name, role string) (User, error) {
 	model := ormUser{Name: name, Role: role}
@@ -95,6 +97,26 @@ func (r *sqliteRepo) InsertDialogue(ctx context.Context, sessionID string, userI
 	return dialogueFromORM(model), nil
 }
 
+// GetDialogue 按主键读取一条对话，用于幂等重试时返回已经完成的结果。
+func (r *sqliteRepo) GetDialogue(ctx context.Context, id int64) (Dialogue, error) {
+	var model ormDialogue
+	if err := r.db.WithContext(ctx).First(&model, id).Error; err != nil {
+		return Dialogue{}, fmt.Errorf("get dialogue %d: %w", id, repositoryError(err))
+	}
+	return dialogueFromORM(model), nil
+}
+
+// GetDialogueByTraceAndRole 查询某次请求保存的指定角色消息。
+func (r *sqliteRepo) GetDialogueByTraceAndRole(ctx context.Context, traceID, role string) (Dialogue, error) {
+	var model ormDialogue
+	if err := r.db.WithContext(ctx).
+		Where("trace_id = ? AND role = ?", traceID, role).
+		Order("id DESC").First(&model).Error; err != nil {
+		return Dialogue{}, fmt.Errorf("get dialogue by trace %s and role %s: %w", traceID, role, repositoryError(err))
+	}
+	return dialogueFromORM(model), nil
+}
+
 // GetRecentDialogues 查询最近 limit 条消息，并按从旧到新的顺序返回。
 func (r *sqliteRepo) GetRecentDialogues(ctx context.Context, sessionID string, limit int) ([]Dialogue, error) {
 	var models []ormDialogue
@@ -151,6 +173,16 @@ func dialogueFromORM(model ormDialogue) Dialogue {
 		CacheHitTokens: model.CacheHitTokens, CacheMissTokens: model.CacheMissTokens,
 		ReasoningTokens: model.ReasoningTokens, TotalTokens: model.TotalTokens,
 		TraceID: model.TraceID, Timestamp: model.Timestamp,
+	}
+}
+
+func chatRequestFromORM(model ormChatRequest) ChatRequest {
+	return ChatRequest{
+		ID: model.ID, ClientMessageID: model.ClientMessageID,
+		SessionID: model.SessionID, UserID: model.UserID, Status: model.Status,
+		UserDialogueID: model.UserDialogueID, AssistantDialogueID: model.AssistantDialogueID,
+		ErrorCode: model.ErrorCode, TraceID: model.TraceID,
+		CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt, CompletedAt: model.CompletedAt,
 	}
 }
 

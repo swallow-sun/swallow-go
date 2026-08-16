@@ -1,4 +1,0 @@
-./config.go
-./openai_compat.go
-./provider.go
-./types.go

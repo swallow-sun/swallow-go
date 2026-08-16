@@ -1,5 +1,0 @@
-./bytesconv.go
-./bytesconv_64.go
-./bytesconv_table.go
-./doc.go
-./errors.go

@@ -14,6 +14,15 @@ const (
 	MigrationStatusCompleted = "completed"
 	// MigrationStatusFailed 表示迁移执行失败，数据库结构事务已回滚。
 	MigrationStatusFailed = "failed"
+
+	// ChatRequestStatusAccepted 表示请求已经接收，但尚未调用模型。
+	ChatRequestStatusAccepted = "accepted"
+	// ChatRequestStatusRunning 表示模型调用或响应读取正在进行。
+	ChatRequestStatusRunning = "running"
+	// ChatRequestStatusCompleted 表示助手回复已经完整保存。
+	ChatRequestStatusCompleted = "completed"
+	// ChatRequestStatusFailed 表示请求已经失败，同一幂等键不会自动重复计费。
+	ChatRequestStatusFailed = "failed"
 )
 
 // Repository 是数据访问层的统一接口。
@@ -26,7 +35,13 @@ type Repository interface {
 	GetSession(ctx context.Context, sessionID string) (Session, error)
 	UpdateSessionActive(ctx context.Context, sessionID string) error
 	InsertDialogue(ctx context.Context, sessionID string, userID int64, role, content string, usage TokenUsage, traceID string) (Dialogue, error)
+	GetDialogue(ctx context.Context, id int64) (Dialogue, error)
+	GetDialogueByTraceAndRole(ctx context.Context, traceID, role string) (Dialogue, error)
 	GetRecentDialogues(ctx context.Context, sessionID string, limit int) ([]Dialogue, error)
+	BeginChatRequest(ctx context.Context, clientMessageID, sessionID string, userID int64, traceID string) (ChatRequest, bool, error)
+	MarkChatRequestRunning(ctx context.Context, requestID int64, userDialogueID int64) error
+	CompleteChatRequest(ctx context.Context, requestID int64, assistantDialogueID int64) error
+	FailChatRequest(ctx context.Context, requestID int64, errorCode string) error
 	InsertEvent(ctx context.Context, eventType string, userID *int64, data string, durationMs int64, success bool, traceID string) error
 	Close() error
 }
@@ -89,6 +104,22 @@ type Event struct {
 	Success    bool
 }
 
+// ChatRequest 表示一轮客户端消息的幂等执行状态。
+type ChatRequest struct {
+	ID                  int64
+	ClientMessageID     string
+	SessionID           string
+	UserID              int64
+	Status              string
+	UserDialogueID      *int64
+	AssistantDialogueID *int64
+	ErrorCode           *string
+	TraceID             string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	CompletedAt         *time.Time
+}
+
 type ormUser struct {
 	ID           int64  `gorm:"primaryKey;autoIncrement"`
 	Name         string `gorm:"not null"`
@@ -132,6 +163,21 @@ type ormEvent struct {
 	Timestamp  time.Time `gorm:"autoCreateTime;index:idx_events_type_time,sort:desc,priority:2"`
 	DurationMs int64
 	Success    *bool `gorm:"default:true"`
+}
+
+type ormChatRequest struct {
+	ID                  int64  `gorm:"primaryKey;autoIncrement"`
+	ClientMessageID     string `gorm:"not null;uniqueIndex:idx_chat_requests_session_client,priority:2"`
+	SessionID           string `gorm:"not null;uniqueIndex:idx_chat_requests_session_client,priority:1"`
+	UserID              int64  `gorm:"not null"`
+	Status              string `gorm:"not null;index:idx_chat_requests_status_updated,priority:1"`
+	UserDialogueID      *int64
+	AssistantDialogueID *int64
+	ErrorCode           *string
+	TraceID             string    `gorm:"not null;index:idx_chat_requests_trace"`
+	CreatedAt           time.Time `gorm:"autoCreateTime"`
+	UpdatedAt           time.Time `gorm:"autoUpdateTime;index:idx_chat_requests_status_updated,sort:desc,priority:2"`
+	CompletedAt         *time.Time
 }
 
 type sqliteRepo struct {
