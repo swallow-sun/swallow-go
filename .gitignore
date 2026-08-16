@@ -32,6 +32,9 @@ _testmain.go
 /.idea
 /.vscode
 /output
+/.temp/
+/.tmp/
+.hz
 *.local.yml
 dumped_hertz_remote_config.json
 
