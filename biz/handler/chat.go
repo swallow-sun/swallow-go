@@ -16,6 +16,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/swallow-sun/swallow-go/biz/service"
+	"github.com/swallow-sun/swallow-go/internal/trace"
 	"github.com/swallow-sun/swallow-go/pkg/logger"
 	"go.uber.org/zap"
 )
@@ -54,6 +55,17 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 		c.JSON(consts.StatusBadRequest, map[string]string{"error": "client_message_id is too long"})
 		return
 	}
+
+	// 确保 context 里有 trace ID，后面 Span 和所有子调用共用同一个 trace ID。
+	// trace.Ensure 检查 context 里有没有 trace ID，没有就生成一个塞进去。
+	ctx, _ = trace.Ensure(ctx)
+
+	// 创建根 Span：Handler 层，记录从收到请求到响应结束的完整耗时。
+	// trace.StartSpan 从 context 里取 trace ID 和父 Span（这里没有父 Span，是根），
+	// 把 Span 塞进 context 返回，后面的 service 和 agent 层能通过 context 找到这个 Span 作为父。
+	ctx, span := trace.StartSpan(ctx, "handler", "POST /api/chat")
+	// defer span.EndOK() 保证无论正常返回还是中途出错都标记 Span 结束
+	defer span.EndOK()
 
 	// 调 ChatService.Chat 启动流式对话。
 	// d.chat 是 Deps 里的 ChatService 指针，在 NewDeps 时创建好的

@@ -7,6 +7,7 @@
 //  4. 定义状态常量：迁移状态（running/completed/failed）和聊天请求状态（accepted/running/completed/failed）。
 //  5. 定义各表列名常量：SELECT 查询用显式列名，不用 SELECT *。
 //  6. 定义迁移相关结构体：Migration（磁盘迁移文件）和 MigrationRecord（schema_migrations 表记录）。
+//  7. 定义 Span ORM 模型：ormSpan 对应 spans 表，记录一次请求经过的每个处理步骤。
 package data
 
 import (
@@ -128,6 +129,10 @@ type Repository interface {
 
 	// InsertEvent 保存一条埋点事件。
 	InsertEvent(ctx context.Context, eventType string, userID *int64, data string, durationMs int64, success bool, traceID string) error
+
+	// InsertSpan 保存一条 Span 记录，记录请求经过的一个处理步骤。
+	// 多个 Span 共享同一个 trace_id，通过 parent_span_id 组成调用链树。
+	InsertSpan(ctx context.Context, span Span) error
 
 	// Close 关闭数据库连接。
 	Close() error
@@ -620,6 +625,58 @@ type MigrationRecord struct {
 	ErrorMessage *string
 }
 
+// Span 是 Span 追踪记录的业务对象。
+// 和 trace.Span 对应，但这个不依赖 trace 包，给 data 层用。
+type Span struct {
+	// ID 是 Span 的唯一标识（UUID），主键
+	ID string
+	// TraceID 是链路追踪 ID，同一次请求的所有 Span 共享同一个
+	TraceID string
+	// ParentSpanID 是父 Span 的 ID，根 Span 为空字符串
+	ParentSpanID string
+	// Component 是组件名：handler / chat_service / model_provider
+	Component string
+	// Operation 是操作名：POST /api/chat、stream_loop、llm.stream 等
+	Operation string
+	// Status 是状态：ok / error / cancelled
+	Status string
+	// DurationMs 是耗时（毫秒）
+	DurationMs int64
+	// StartedAt 是开始时间
+	StartedAt time.Time
+	// FinishedAt 是结束时间
+	FinishedAt time.Time
+	// Attributes 是附加属性 JSON 字符串（model、error_code 等）
+	Attributes string
+}
+
+// ormSpan 是 spans 表的 GORM ORM 模型。
+type ormSpan struct {
+	// ID 是 Span 的唯一标识（UUID），主键
+	ID string `gorm:"primaryKey"`
+	// TraceID 是链路追踪 ID，不允许空
+	TraceID string `gorm:"not null;index:idx_spans_trace,priority:1"`
+	// ParentSpanID 是父 Span 的 ID，根 Span 为 NULL
+	ParentSpanID *string `gorm:"index:idx_spans_parent"`
+	// Component 是组件名，不允许空
+	Component string `gorm:"not null"`
+	// Operation 是操作名，不允许空
+	Operation string `gorm:"not null"`
+	// Status 是状态，不允许空
+	Status string `gorm:"not null"`
+	// DurationMs 是耗时（毫秒），默认 0
+	DurationMs int64 `gorm:"default:0"`
+	// StartedAt 是开始时间，不允许空
+	StartedAt time.Time `gorm:"not null;index:idx_spans_trace,priority:2"`
+	// FinishedAt 是结束时间，允许 NULL（异常退出没来得及标记）
+	FinishedAt *time.Time
+	// Attributes 是附加属性 JSON 字符串，允许 NULL
+	Attributes *string
+}
+
+// TableName 指定 spans 表名，不靠 GORM 的复数命名规则。
+func (ormSpan) TableName() string { return "spans" }
+
 // 下面是各表的列名常量，SELECT 查询用显式列名，不用 SELECT *。
 // 好处：表加列不会意外查出不需要的数据；列顺序稳定；SQL 日志清晰。
 const (
@@ -643,4 +700,7 @@ const (
 
 	// schema_migrations 表列名
 	migrationRecordColumns = "version, name, checksum, status, started_at, completed_at, error_message"
+
+	// spans 表列名
+	spanColumns = "id, trace_id, parent_span_id, component, operation, status, duration_ms, started_at, finished_at, attributes"
 )

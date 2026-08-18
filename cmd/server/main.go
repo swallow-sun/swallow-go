@@ -132,6 +132,10 @@ func run() (runErr error) {
 	// EventSinkAdapter 把埋点事件写到 repo（SQLite 数据库）里
 	telemetry.SetSink(data.EventSinkAdapter{Repo: repo})
 
+	// trace.SetSpanSink 设置 Span 追踪记录的写库目标
+	// SpanSinkAdapter 把 trace.Span 转成 data.Span 写进 spans 表
+	trace.SetSpanSink(data.SpanSinkAdapter{Repo: repo})
+
 	// 这是关闭资源的 defer，执行顺序在前面两个 defer 之前（LIFO，最后注册最先执行）
 	// 程序退出时：先刷新埋点事件（telemetry.Shutdown）再关闭数据库（repo.Close）
 	// 顺序不能反：如果先关数据库，埋点事件就写不进去了

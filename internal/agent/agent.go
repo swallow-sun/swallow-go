@@ -247,6 +247,15 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string) (llm.StreamRea
 	// 0. 生成 trace ID，后续所有日志/埋点/DB 都带上
 	// trace.Ensure 检查 context 里有没有 trace ID，没有就生成一个
 	ctx, traceID := trace.Ensure(ctx)
+
+	// 创建孙 Span：Model Provider 层，记录 LLM 流式连接的耗时。
+	// trace.StartSpan 从 context 里取父 Span（Service 层的 Span），把自己挂上去。
+	// 三层 Span 组成调用链：Handler → ChatService → ModelProvider
+	ctx, span := trace.StartSpan(ctx, "model_provider", "llm.stream")
+	// 给 Span 加附加属性：模型名，方便后续按模型过滤查询
+	span.SetAttr("model", a.model)
+	// defer span.EndOK() 保证无论正常返回还是中途出错都标记 Span 结束
+	defer span.EndOK()
 	logger.Info("流式对话开始",
 		zap.String("trace_id", traceID),
 		zap.String("model", a.model),

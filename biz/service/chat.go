@@ -49,6 +49,15 @@ func NewChatService(deps *Deps) *ChatService {
 //
 // ctx 由 handler 传进来，service 用它检测客户端有没有断开。
 func (s *ChatService) Chat(ctx context.Context, sessionID, clientMessageID, message string) (<-chan ChatEvent, error) {
+	// 创建子 Span：Service 层，记录对话业务逻辑的耗时。
+	// trace.StartSpan 从 context 里取父 Span（Handler 层的根 Span），把自己挂上去。
+	// 返回的 ctx 里塞了当前 Span，后面 ChatStream 调 trace.StartSpan 时能从 ctx 里找到这个 Span 作为父。
+	ctx, span := trace.StartSpan(ctx, "chat_service", "chat")
+	// 给 Span 加附加属性：会话 ID，方便后续按会话查询 Span
+	span.SetAttr("session_id", sessionID)
+	// defer span.EndOK() 保证无论正常返回还是中途出错都标记 Span 结束
+	defer span.EndOK()
+
 	// 拿 session_id 去数据库查，确认这个会话确实存在。
 	// 防止客户端传了个不存在的 session_id 还往下走一堆逻辑
 	session, err := s.deps.repo.GetSession(ctx, sessionID)
