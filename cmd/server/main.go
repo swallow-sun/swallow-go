@@ -24,6 +24,7 @@ import (
 	"github.com/swallow-sun/swallow-go/biz/router"
 	"github.com/swallow-sun/swallow-go/internal/config"
 	"github.com/swallow-sun/swallow-go/internal/data"
+	"github.com/swallow-sun/swallow-go/internal/debug"
 	"github.com/swallow-sun/swallow-go/internal/settings"
 	"github.com/swallow-sun/swallow-go/internal/telemetry"
 	"github.com/swallow-sun/swallow-go/internal/trace"
@@ -158,6 +159,14 @@ func run() (runErr error) {
 	// 4. 组装业务依赖（使用数据库加载并解密后的 llm 配置）
 	// 项目的依赖组装工厂——程序启动时调一次，把所有零件拼好塞进一个 Deps 结构体里，后续 handler 直接用
 	deps := handler.NewDeps(cfg, repo)
+
+	// 启动 pprof 调试服务（如果 config 里配了 pprof_port > 0）
+	// 返回 shutdown 函数，放到 defer 里在程序退出时优雅关闭
+	// 生产环境 pprof_port=0 不会启动，开发时在 config.local.toml 里设成 6060 即可
+	pprofShutdown := debug.Start(cfg.Debug.PProfPort)
+	if pprofShutdown != nil {
+		defer pprofShutdown()
+	}
 
 	// Hertz 框架自带一套日志系统（hlog），这里把它转发到项目唯一的全局 logger
 	// hlog.SetLogger 接收一个实现了 hlog.FullLogger 接口的适配器

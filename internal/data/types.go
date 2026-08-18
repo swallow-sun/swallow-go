@@ -5,7 +5,8 @@
 //  2. 定义业务实体结构体：User、Session、Dialogue、ChatRequest、Event、AppSetting、EncryptedSecret 等。
 //  3. 定义 ORM 模型结构体：ormUser、ormSession、ormDialogue 等，带 GORM 标签映射数据库表。
 //  4. 定义状态常量：迁移状态（running/completed/failed）和聊天请求状态（accepted/running/completed/failed）。
-//  5. 定义迁移相关结构体：Migration（磁盘迁移文件）和 MigrationRecord（schema_migrations 表记录）。
+//  5. 定义各表列名常量：SELECT 查询用显式列名，不用 SELECT *。
+//  6. 定义迁移相关结构体：Migration（磁盘迁移文件）和 MigrationRecord（schema_migrations 表记录）。
 package data
 
 import (
@@ -38,6 +39,19 @@ const (
 	// ChatRequestStatusFailed 表示请求已经失败，同一幂等键不会自动重复计费。
 	// FailChatRequest 把状态从 accepted/running 切到 failed。
 	ChatRequestStatusFailed = "failed"
+
+	// 下面是 model_usages 表的操作类型和状态常量。
+	// operation 字段区分这次模型调用是干什么的：聊天、嵌入、视觉、语音识别还是语音合成。
+	ModelOperationChat     = "chat"      // 文字对话
+	ModelOperationEmbedding = "embedding" // 向量嵌入
+	ModelOperationVision   = "vision"    // 视觉理解
+	ModelOperationASR      = "asr"       // 语音识别（Automatic Speech Recognition）
+	ModelOperationTTS      = "tts"       // 语音合成（Text To Speech）
+
+	// status 字段标记这次模型调用成功还是失败。
+	// 和 ChatRequest 的状态不同，model_usages 只记最终结果，不记中间状态。
+	ModelUsageStatusOK     = "ok"     // 模型调用成功
+	ModelUsageStatusFailed = "failed" // 模型调用失败
 )
 
 // Repository 是数据访问层的统一接口。
@@ -49,6 +63,7 @@ const (
 //   - 会话：CreateSession、GetSession、UpdateSessionActive
 //   - 对话：InsertDialogue、GetDialogue、GetDialogueByTraceAndRole、GetRecentDialogues
 //   - 聊天幂等：BeginChatRequest、MarkChatRequestRunning、CompleteChatRequest、FailChatRequest
+//   - 模型用量：InsertModelUsage
 //   - 普通配置：GetAppSetting、CreateAppSettingIfAbsent、UpsertAppSetting、DeleteAppSetting
 //   - 加密密钥：GetEncryptedSecret、CreateEncryptedSecretIfAbsent、UpsertEncryptedSecret、DeleteEncryptedSecret
 //   - 事件埋点：InsertEvent
@@ -87,6 +102,11 @@ type Repository interface {
 	CompleteChatRequest(ctx context.Context, requestID int64, assistantDialogueID int64) error
 	// FailChatRequest 标记请求失败，记录错误码。
 	FailChatRequest(ctx context.Context, requestID int64, errorCode string) error
+
+	// InsertModelUsage 保存一条模型调用的 Token 用量和费用估算记录。
+	// 每次成功或失败的模型调用都写一条，独立于 dialogues 表，
+	// 方便按供应商、模型、操作类型聚合统计成本。
+	InsertModelUsage(ctx context.Context, usage ModelUsage) error
 
 	// GetAppSetting 按键名读普通配置。
 	GetAppSetting(ctx context.Context, key string) (AppSetting, error)
@@ -436,6 +456,127 @@ type ormEncryptedSecret struct {
 	UpdatedAt time.Time `gorm:"autoUpdateTime"`
 }
 
+// ModelUsage 是一次模型调用的 Token 用量和费用估算记录（业务对象）。
+// 每次调模型（成功或失败）都写一条，独立于 dialogues 表。
+// 方便按供应商、模型、操作类型聚合统计成本。
+//
+// NULL 和 0 的区别（方案铁律）：
+//   - 0：供应商明确返回该项没有消耗。
+//   - nil（指针为 nil）：供应商没返回、该模型不适用或当前无法可靠计算。
+// 不能把 nil 自动变成 0，否则看板会错误显示"没有缓存 Token"。
+type ModelUsage struct {
+	// ID 数据库自增主键
+	ID int64
+	// RequestID 本次模型调用的内部请求标识，目前用 trace_id
+	RequestID string
+	// TraceID 链路追踪 ID，关联 events 和 dialogues
+	TraceID string
+	// SessionID 哪个会话产生的调用，空字符串表示不关联会话
+	SessionID string
+	// UserID 哪个用户产生的调用，0 表示不关联用户
+	UserID int64
+	// DeviceID 哪个设备产生的调用（阶段 4+ 才有），空字符串表示本机调用
+	DeviceID string
+	// Provider 供应商名称，如 "deepseek"、"openai"
+	Provider string
+	// Model 模型名，如 "deepseek-chat"
+	Model string
+	// Operation 操作类型：chat/embedding/vision/asr/tts
+	Operation string
+	// InputTokens 输入 Token 总量
+	// 指针类型：nil = 供应商没返回，非 nil = 供应商返回了具体数值
+	InputTokens *int
+	// OutputTokens 输出 Token 数
+	OutputTokens *int
+	// CachedInputTokens 输入中命中供应商缓存的部分
+	// 指针类型：nil = 供应商没返回，非 nil = 供应商返回了具体数值
+	CachedInputTokens *int
+	// CacheMissTokens 缓存未命中的输入 Token（DeepSeek/OpenAI 返回 prompt_cache_miss_tokens）
+	// 指针类型：nil = 供应商没返回，非 nil = 供应商返回了具体数值
+	CacheMissTokens *int
+	// CacheCreationTokens 创建缓存时单独计量的输入（Anthropic 的概念）；供应商不支持则为 nil
+	CacheCreationTokens *int
+	// ReasoningTokens 供应商明确返回的推理 Token；不支持则为 nil
+	ReasoningTokens *int
+	// TotalTokens 总 Token 数；按供应商返回值保存，缺失时才由已知字段推导
+	TotalTokens *int
+	// InputAudioSeconds ASR 输入音频时长（秒），非 ASR 操作为 nil
+	InputAudioSeconds *float64
+	// OutputAudioSeconds TTS 输出音频时长（秒），非 TTS 操作为 nil
+	OutputAudioSeconds *float64
+	// InputImageCount 视觉操作输入图片数，非视觉操作为 nil
+	InputImageCount *int
+	// Currency 费用币种，如 "USD"、"CNY"；无费用估算时为空
+	Currency string
+	// EstimatedCostMicros 估算费用，百万分之一货币单位；无估算时为 nil
+	EstimatedCostMicros *int64
+	// ProviderRequestID 供应商返回的请求 ID（有些供应商不返回）
+	ProviderRequestID string
+	// Status 调用状态：ok / failed
+	Status string
+	// DurationMs 调用耗时（毫秒）
+	DurationMs int64
+	// OccurredAt 调用发生时间
+	OccurredAt time.Time
+}
+
+// ormModelUsage 是 model_usages 表的 GORM ORM 模型。
+// 所有字段都用指针类型（*int、*float64、*int64），对应数据库里的 NULL。
+// 只有 ID、TraceID、Provider、Model、Operation、Status、OccurredAt 不允许 NULL。
+type ormModelUsage struct {
+	// ID 自增主键
+	ID int64 `gorm:"primaryKey;autoIncrement"`
+	// RequestID 内部请求标识，目前用 trace_id
+	RequestID *string
+	// TraceID 链路追踪 ID，关联 events 和 dialogues，不允许空
+	TraceID string `gorm:"not null;index:idx_model_usages_trace"`
+	// SessionID 会话 ID，允许 NULL
+	SessionID *string
+	// UserID 用户 ID，允许 NULL，同时是 idx_model_usages_user 索引第一列
+	UserID *int64 `gorm:"index:idx_model_usages_user,priority:1"`
+	// DeviceID 设备 ID，允许 NULL（阶段 4+ 才有）
+	DeviceID *string
+	// Provider 供应商名称，不允许空，同时是 idx_model_usages_provider_model 索引第一列
+	Provider string `gorm:"not null;index:idx_model_usages_provider_model,priority:1"`
+	// Model 模型名，不允许空，同时是 idx_model_usages_provider_model 索引第二列
+	Model string `gorm:"not null;index:idx_model_usages_provider_model,priority:2"`
+	// Operation 操作类型，不允许空
+	Operation string `gorm:"not null"`
+	// InputTokens 输入 Token 总量，允许 NULL
+	InputTokens *int
+	// OutputTokens 输出 Token 数，允许 NULL
+	OutputTokens *int
+	// CachedInputTokens 缓存命中输入 Token，允许 NULL
+	CachedInputTokens *int
+	// CacheMissTokens 缓存未命中输入 Token，允许 NULL
+	CacheMissTokens *int
+	// CacheCreationTokens 缓存创建 Token，允许 NULL
+	CacheCreationTokens *int
+	// ReasoningTokens 推理 Token，允许 NULL
+	ReasoningTokens *int
+	// TotalTokens 总 Token 数，允许 NULL
+	TotalTokens *int
+	// InputAudioSeconds ASR 输入音频时长，允许 NULL
+	InputAudioSeconds *float64
+	// OutputAudioSeconds TTS 输出音频时长，允许 NULL
+	OutputAudioSeconds *float64
+	// InputImageCount 视觉输入图片数，允许 NULL
+	InputImageCount *int
+	// Currency 费用币种，允许 NULL
+	Currency *string
+	// EstimatedCostMicros 估算费用，允许 NULL
+	EstimatedCostMicros *int64
+	// ProviderRequestID 供应商请求 ID，允许 NULL
+	ProviderRequestID *string
+	// Status 调用状态，不允许空
+	Status string `gorm:"not null"`
+	// DurationMs 调用耗时（毫秒）
+	DurationMs int64
+	// OccurredAt 调用发生时间，不允许空
+	// 同时是 idx_model_usages_time 索引和 idx_model_usages_user 索引第二列
+	OccurredAt time.Time `gorm:"not null;index:idx_model_usages_time;index:idx_model_usages_user,priority:2"`
+}
+
 // sqliteRepo 是 Repository 接口的 SQLite 实现。
 // 里面就一个字段 db，是 GORM 的数据库连接对象。
 // 所有 Repository 方法都挂在 *sqliteRepo 上，通过 db 操作数据库。
@@ -478,3 +619,28 @@ type MigrationRecord struct {
 	// 失败时的错误信息，指针类型：成功时为 NULL，失败时才有值
 	ErrorMessage *string
 }
+
+// 下面是各表的列名常量，SELECT 查询用显式列名，不用 SELECT *。
+// 好处：表加列不会意外查出不需要的数据；列顺序稳定；SQL 日志清晰。
+const (
+	// users 表列名
+	userColumns = "id, name, role, voice_print, face_print, created_at, last_active_at"
+
+	// sessions 表列名
+	sessionColumns = "id, user_id, started_at, last_active_at, status"
+
+	// dialogues 表列名
+	dialogueColumns = "id, session_id, user_id, role, content, prompt_tokens, completion_tokens, cache_hit_tokens, cache_miss_tokens, reasoning_tokens, total_tokens, trace_id, timestamp"
+
+	// chat_requests 表列名
+	chatRequestColumns = "id, client_message_id, session_id, user_id, status, user_dialogue_id, assistant_dialogue_id, error_code, trace_id, created_at, updated_at, completed_at"
+
+	// app_settings 表列名
+	appSettingColumns = "setting_key, setting_value, value_type, description, updated_at"
+
+	// encrypted_secrets 表列名
+	encryptedSecretColumns = "secret_key, ciphertext, nonce, algorithm, key_version, updated_at"
+
+	// schema_migrations 表列名
+	migrationRecordColumns = "version, name, checksum, status, started_at, completed_at, error_message"
+)

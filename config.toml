@@ -10,6 +10,7 @@ environment = "development"
 port = 8888
 
 [llm]
+provider = "deepseek"
 base_url = "https://api.deepseek.com/v1"
 api_key  = ""
 model    = "deepseek-chat"
@@ -21,3 +22,10 @@ migrations_dir = "script/migrations"
 [auth]
 # 可在不提交 Git 的 config.local.toml 中填写，首次启动后会加密写入数据库。
 owner_token = ""
+
+[debug]
+# pprof HTTP 端口，0=不启动。开发时设 6060，用 go tool pprof 排查内存/goroutine 泄漏。
+# 抓堆快照：go tool pprof http://localhost:6060/debug/pprof/heap
+# 抓 goroutine：go tool pprof http://localhost:6060/debug/pprof/goroutine
+# 生产环境保持 0。
+pprof_port = 0

@@ -238,6 +238,45 @@ func (s *ChatService) streamLoop(
 		return
 	}
 
+	// 写一条 model_usages 记录，独立保存这次模型调用的 Token 用量和费用估算。
+	// 方案要求：model_usages 写入失败应记 ERROR 和待补偿标记，不能静默丢失成本数据。
+	// 当前阶段没有价格快照表，estimated_cost_micros 留空（nil），等 model_price_snapshots 建好后再填。
+	// llm.Usage 里的 int 字段转成 *int 指针：供应商返回了 0 就是 &0，没返回的字段传 nil。
+	modelUsage := data.ModelUsage{
+		RequestID:         traceID,                           // 内部请求标识，目前用 trace_id
+		TraceID:           traceID,                           // 链路追踪 ID
+		SessionID:         chatRequest.SessionID,             // 哪个会话产生的
+		UserID:            chatRequest.UserID,                // 哪个用户产生的
+		Provider:          s.deps.cfg.LLM.Provider,          // 供应商名称，如 "deepseek"
+		Model:             s.deps.cfg.LLM.Model,              // 模型名，如 "deepseek-chat"
+		Operation:         data.ModelOperationChat,           // 操作类型：文字对话
+		InputTokens:       data.IntPtr(usage.PromptTokens),              // 输入 Token 总量
+		OutputTokens:      data.IntPtr(usage.CompletionTokens),           // 输出 Token 数
+		CachedInputTokens: data.IntPtr(usage.CacheHitTokens()),            // 缓存命中输入 Token
+		CacheMissTokens:   data.IntPtr(usage.CacheMissTokens()),           // 缓存未命中输入 Token（DeepSeek 返回 prompt_cache_miss_tokens）
+		// CacheCreationTokens 留 nil：当前用 DeepSeek/OpenAI，不返回缓存创建 Token（Anthropic 才有）
+		// ReasoningTokens 只有推理模型才返回，普通对话模型返回 0，这里如实保存
+		ReasoningTokens:   data.IntPtr(usage.CompletionTokensDetails.ReasoningTokens),
+		TotalTokens:       data.IntPtr(usage.TotalTokens),               // 总 Token 数
+		// 音频和图片相关字段留 nil：当前只有文字对话，没有 ASR/TTS/视觉
+		Currency:          "",                               // 无费用估算，币种留空
+		// EstimatedCostMicros 留 nil：等价格快照表建好后再填
+		ProviderRequestID: "",                               // 供应商请求 ID，有些供应商不返回
+		Status:            data.ModelUsageStatusOK,          // 调用成功
+		DurationMs:        metrics.TotalDurationMs,          // 总耗时（毫秒）
+		OccurredAt:        time.Now(),                       // 调用发生时间
+	}
+	if err := s.deps.repo.InsertModelUsage(finishCtx, modelUsage); err != nil {
+		// 写入失败不能静默丢失，记 ERROR 日志，但不阻断主流程（对话已经成功了）
+		// 方案说"普通文字对话可返回成功并报告观测降级"
+		logger.Error("写入模型用量记录失败，成本数据可能丢失",
+			zap.Error(err),
+			zap.String("trace_id", traceID),
+			zap.String("provider", modelUsage.Provider),
+			zap.String("model", modelUsage.Model),
+		)
+	}
+
 	// 助手消息已经存进数据库后再完成幂等请求。两步之间如果进程断了，重试时会按 trace 恢复状态。
 	// GetDialogueByTraceAndRole 按 trace ID 和角色查对话记录
 	// string(llm.RoleAssistant) 把枚举转成字符串 "assistant"

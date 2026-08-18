@@ -10,6 +10,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/swallow-sun/swallow-go/pkg/logger"
+	"go.uber.org/zap"
 	"gorm.io/gorm/clause"
 )
 
@@ -19,11 +21,9 @@ func (r *sqliteRepo) GetAppSetting(ctx context.Context, key string) (AppSetting,
 	// 空的 ORM 模型变量，准备接收查询结果
 	var model ormAppSetting
 
-	// .First(&model, "setting_key = ?", key)
-	//   First 的第二个参数直接写 WHERE 条件，GORM 自动拼成 WHERE setting_key = ?
-	//   setting_key 是 app_settings 表的主键列（GORM tag 里写了 column:setting_key;primaryKey）
-	//   找不到返回 gorm.ErrRecordNotFound → repositoryError 转成 sql.ErrNoRows
-	if err := r.db.WithContext(ctx).First(&model, "setting_key = ?", key).Error; err != nil {
+	// .Select(appSettingColumns) 只查需要的列，不用 SELECT *
+	// .First(&model, "setting_key = ?", key) 按主键查一条
+	if err := r.db.WithContext(ctx).Select(appSettingColumns).First(&model, "setting_key = ?", key).Error; err != nil {
 		return AppSetting{}, fmt.Errorf("get app setting %q: %w", key, repositoryError(err))
 	}
 	// 转成业务对象返回
@@ -42,10 +42,18 @@ func (r *sqliteRepo) CreateAppSettingIfAbsent(ctx context.Context, setting AppSe
 	// 效果：配置已存在就不插，配置不存在才插
 	result := r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&model)
 	if result.Error != nil {
+		logger.Error("app_settings 写入失败",
+			zap.String("key", setting.Key),
+			zap.Error(result.Error),
+		)
 		return false, fmt.Errorf("create app setting %q: %w", setting.Key, result.Error)
 	}
 
 	// RowsAffected == 1 说明插成功了（新建），== 0 说明冲突了（已存在）
+	logger.Debug("app_settings 写入完成",
+		zap.Any("row", model),
+		zap.Bool("created", result.RowsAffected == 1),
+	)
 	return result.RowsAffected == 1, nil
 }
 
@@ -67,8 +75,16 @@ func (r *sqliteRepo) UpsertAppSetting(ctx context.Context, setting AppSetting) e
 			"setting_value", "value_type", "description", "updated_at",
 		}),
 	}).Create(&model).Error; err != nil {
+		logger.Error("app_settings upsert 失败",
+			zap.String("key", setting.Key),
+			zap.Error(err),
+		)
 		return fmt.Errorf("upsert app setting %q: %w", setting.Key, err)
 	}
+
+	logger.Debug("app_settings upsert 成功",
+		zap.Any("row", model),
+	)
 	return nil
 }
 
@@ -79,8 +95,16 @@ func (r *sqliteRepo) DeleteAppSetting(ctx context.Context, key string) error {
 	// .Delete(&ormAppSetting{}) 删除匹配的记录
 	//   相当于 DELETE FROM app_settings WHERE setting_key = ?
 	if err := r.db.WithContext(ctx).Where("setting_key = ?", key).Delete(&ormAppSetting{}).Error; err != nil {
+		logger.Error("app_settings 删除失败",
+			zap.String("key", key),
+			zap.Error(err),
+		)
 		return fmt.Errorf("delete app setting %q: %w", key, err)
 	}
+
+	logger.Debug("app_settings 删除成功",
+		zap.String("key", key),
+	)
 	return nil
 }
 
@@ -90,9 +114,9 @@ func (r *sqliteRepo) GetEncryptedSecret(ctx context.Context, key string) (Encryp
 	// 空的 ORM 模型变量
 	var model ormEncryptedSecret
 
+	// .Select(encryptedSecretColumns) 只查需要的列，不用 SELECT *
 	// .First(&model, "secret_key = ?", key) 按主键查一条
-	//   secret_key 是 encrypted_secrets 表的主键列
-	if err := r.db.WithContext(ctx).First(&model, "secret_key = ?", key).Error; err != nil {
+	if err := r.db.WithContext(ctx).Select(encryptedSecretColumns).First(&model, "secret_key = ?", key).Error; err != nil {
 		return EncryptedSecret{}, fmt.Errorf("get encrypted secret %q: %w", key, repositoryError(err))
 	}
 	// 转成业务对象返回
@@ -110,10 +134,23 @@ func (r *sqliteRepo) CreateEncryptedSecretIfAbsent(ctx context.Context, secret E
 	// .Create(&model) 执行 INSERT
 	result := r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&model)
 	if result.Error != nil {
+		logger.Error("encrypted_secrets 写入失败",
+			zap.String("key", secret.Key),
+			zap.String("algorithm", secret.Algorithm),
+			zap.Int("key_version", secret.KeyVersion),
+			zap.Error(result.Error),
+		)
 		return false, fmt.Errorf("create encrypted secret %q: %w", secret.Key, result.Error)
 	}
 
 	// RowsAffected == 1 新建成功，== 0 已存在
+	// 注意：密文字段（ciphertext、nonce）不打日志，所以不用 zap.Any("row", model)
+	logger.Debug("encrypted_secrets 写入完成",
+		zap.String("key", secret.Key),
+		zap.String("algorithm", secret.Algorithm),
+		zap.Int("key_version", secret.KeyVersion),
+		zap.Bool("created", result.RowsAffected == 1),
+	)
 	return result.RowsAffected == 1, nil
 }
 
@@ -134,8 +171,21 @@ func (r *sqliteRepo) UpsertEncryptedSecret(ctx context.Context, secret Encrypted
 			"ciphertext", "nonce", "algorithm", "key_version", "updated_at",
 		}),
 	}).Create(&model).Error; err != nil {
+		logger.Error("encrypted_secrets upsert 失败",
+			zap.String("key", secret.Key),
+			zap.String("algorithm", secret.Algorithm),
+			zap.Int("key_version", secret.KeyVersion),
+			zap.Error(err),
+		)
 		return fmt.Errorf("upsert encrypted secret %q: %w", secret.Key, err)
 	}
+
+	// 注意：密文字段（ciphertext、nonce）不打日志，所以不用 zap.Any("row", model)
+	logger.Debug("encrypted_secrets upsert 成功",
+		zap.String("key", secret.Key),
+		zap.String("algorithm", secret.Algorithm),
+		zap.Int("key_version", secret.KeyVersion),
+	)
 	return nil
 }
 
@@ -146,8 +196,16 @@ func (r *sqliteRepo) DeleteEncryptedSecret(ctx context.Context, key string) erro
 	// .Delete(&ormEncryptedSecret{}) 删除匹配的记录
 	//   相当于 DELETE FROM encrypted_secrets WHERE secret_key = ?
 	if err := r.db.WithContext(ctx).Where("secret_key = ?", key).Delete(&ormEncryptedSecret{}).Error; err != nil {
+		logger.Error("encrypted_secrets 删除失败",
+			zap.String("key", key),
+			zap.Error(err),
+		)
 		return fmt.Errorf("delete encrypted secret %q: %w", key, err)
 	}
+
+	logger.Debug("encrypted_secrets 删除成功",
+		zap.String("key", key),
+	)
 	return nil
 }
 

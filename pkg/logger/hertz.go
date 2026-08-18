@@ -1,7 +1,7 @@
 // hertz.go 放 Hertz 框架日志适配器，把框架内部日志转发到项目全局 logger。
 //
 // 做的事情：
-//  1. NewHertzAdapter：创建适配器，生产环境过滤 Debug/Trace 级别日志。
+//  1. NewHertzAdapter：创建适配器，级别固定 Info，过滤掉 Debug/Trace（主要是路由注册日志，格式吵且改不了）。
 //  2. 实现全级别日志方法：Trace/Debug/Info/Notice/Warn/Error/Fatal 及其 Format 版本和带 context 版本。
 //  3. 所有方法通过 write 统一出口：级别过滤后加上 "HERTZ: " 前缀转发到 logger。
 //  4. SetLevel/SetOutput：支持运行时调整级别和输出目标。
@@ -11,21 +11,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/common/hlog"
 )
 
 // NewHertzAdapter 创建直接使用项目全局 logger 的 Hertz 日志适配器。
 // 返回的 *HertzAdapter 实现了 hlog.FullLogger 接口，可以替换 Hertz 默认的日志输出。
+// 级别固定设为 Info：Hertz 的 Debug 日志主要是路由注册信息（格式很吵且改不了），
+// 对开发没帮助；项目自己的 Debug 日志走 zap 直接输出，不走 hlog，不受影响。
 func NewHertzAdapter() *HertzAdapter {
-	// 默认级别设为 Debug，开发环境输出所有级别的日志
-	level := hlog.LevelDebug
-	if IsProduction() {
-		// 生产环境改成 Info，过滤掉 Debug 和 Trace 级别（太吵了）
-		level = hlog.LevelInfo
-	}
-	// 构造适配器，把级别存进去
-	return &HertzAdapter{level: level}
+	return &HertzAdapter{level: hlog.LevelInfo}
 }
 
 // enabled 判断 Hertz 日志级别是否达到当前环境允许输出的最低级别。
@@ -45,7 +41,10 @@ func (l *HertzAdapter) write(level hlog.Level, message string) {
 	}
 	// 在消息前面加上 "HERTZ: " 前缀，这样看日志的时候一眼能分清
 	// 哪些是业务代码打的，哪些是 Hertz 框架内部打的
-	message = "HERTZ: " + message
+	// Hertz 框架自己打的路由注册日志已经带了 "HERTZ: " 前缀，不要再重复加
+	if !strings.HasPrefix(message, "HERTZ: ") {
+		message = "HERTZ: " + message
+	}
 	// 按 Hertz 的级别映射到我们项目 logger 的级别
 	// Hertz 有 7 个级别，我们项目只有 4 个（Debug/Info/Warn/Error），需要合并
 	switch level {
@@ -76,7 +75,7 @@ func (l *HertzAdapter) write(level hlog.Level, message string) {
 // fmt.Sprint(v...) 把这些参数拼成一个字符串，再交给 write 去转发。
 func (l *HertzAdapter) Trace(v ...interface{}) { l.write(hlog.LevelTrace, fmt.Sprint(v...)) }
 
-// Debug 接收 Hertz 开发诊断日志；生产环境会过滤此级别。
+// Debug 接收 Hertz 开发诊断日志；当前级别固定 Info，此方法不会输出。
 func (l *HertzAdapter) Debug(v ...interface{}) { l.write(hlog.LevelDebug, fmt.Sprint(v...)) }
 
 // Info 接收 Hertz 正常运行日志，并转发到项目 Info 日志。

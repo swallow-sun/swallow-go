@@ -1,7 +1,7 @@
 // logger.go 放项目统一的结构化日志入口。
 //
 // 做的事情：
-//  1. Init：初始化全局 zap.Logger，开发模式用控制台输出，生产模式用 JSON 格式。
+//  1. Init：初始化全局 zap.Logger，开发和生产环境都用 JSON 格式输出到 os.Stdout。
 //  2. Info/Warn/Error/Debug：封装 zap.Logger 的同名方法，业务代码通过本包记录日志。
 //  3. Sync：刷新日志缓冲区，入口程序退出前应调用。
 //  4. AddFields：为当前进程后续日志附加公共字段（如 startup_id）。
@@ -9,7 +9,12 @@
 // Debug 在 logger 未初始化时安全忽略（不 panic），其他级别会 panic。
 package logger
 
-import "go.uber.org/zap"
+import (
+	"os"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
 
 // global 是全局 logger 实例，Init 之后可用。
 // 全局变量，所有包通过 Info/Warn/Error/Debug 这些函数间接访问它。
@@ -21,8 +26,7 @@ var environment = EnvironmentDevelopment
 
 // Init 初始化全局 logger。
 // environments 是可选参数，传 "production" 就用生产模式，不传或传空就用开发模式。
-// Phase 1 先用开发模式（控制台输出，易读），
-// 后期改成可配置（开发/生产模式切换）。
+// 开发和生产环境都用 JSON 格式输出，区别只有级别：开发 Debug 起步，生产 Info 起步。
 func Init(environments ...string) error {
 	// environments 是可变参数（...string），外面调用可以传也可以不传
 	// 如果传了且第一个参数不是空串，就用它作为运行环境
@@ -33,44 +37,30 @@ func Init(environments ...string) error {
 		environment = EnvironmentDevelopment
 	}
 
-	// 声明两个变量：l 是 zap.Logger 实例，err 是初始化错误
-	var l *zap.Logger
-	var err error
+	// 编码器配置：用 JSON 格式，方便机器解析，开发和生产统一
+	encoderConfig := zap.NewProductionEncoderConfig()
+	// EncodeTime 用 ISO8601 格式，带时区，比默认的 epoch 毫秒好读
+	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	encoder := zapcore.NewJSONEncoder(encoderConfig)
 
-	// zap 是一个高性能结构化日志库（go.uber.org/zap）。
-	// 它有两种内置模式：
-	//   zap.NewProduction() → 生产模式：输出 JSON 格式，方便机器解析，级别从 Info 开始（Debug 不输出）
-	//   zap.NewDevelopment() → 开发模式：输出控制台彩色文本，人眼易读，级别从 Debug 开始
-	//
-	// zap.AddCallerSkip(1) 的作用：
-	//   zap 默认会记录"谁调用了日志方法"，也就是调用者的文件名和行号。
-	//   AddCallerSkip(1) 让它往上多跳一层。
-	//   因为我们有 logger.Info/Warn/Error 这些封装函数，
-	//   如果不加 skip，zap 记的调用者就是 logger.go 里的 Info 函数（第 79 行），而不是真正打日志的业务代码。
-	//   加了 skip(1) 之后，zap 跳过封装函数，记录真正调用 logger.Info 的那行业务代码的文件名和行号。
-	//
-	// zap.AddStacktrace(zap.ErrorLevel) 的作用：
-	//   只在 Error 及以上级别额外打印调用栈（函数调用链）。
-	//   方便排查"到底是从哪条代码路径触发的这个 Error"。
-	//   只对 Error 级别加，不会给 Info/Debug 也加（那太吵了）。
+	// 级别：开发环境 Debug 起步（全量输出），生产环境 Info 起步（过滤 Debug）
+	var level zapcore.Level
 	if IsProduction() {
-		// 生产环境：JSON 格式输出，便于 ELK 等日志收集系统解析
-		l, err = zap.NewProduction(
-			zap.AddCallerSkip(1),
-			zap.AddStacktrace(zap.ErrorLevel),
-		)
+		level = zap.InfoLevel
 	} else {
-		// 开发环境：控制台彩色文本，人眼易读
-		l, err = zap.NewDevelopment(
-			zap.AddCallerSkip(1),
-			zap.AddStacktrace(zap.ErrorLevel),
-		)
+		level = zap.DebugLevel
 	}
-	if err != nil {
-		// zap 初始化失败（极少见，通常不会出错），把错误返回给调用的人
-		return err
-	}
-	// 初始化成功，赋值给全局变量 global
+
+	// core = JSON 编码器 + os.Stdout 输出 + 级别过滤
+	core := zapcore.NewCore(encoder, zapcore.Lock(os.Stdout), level)
+
+	// zap.AddCallerSkip(1) 让 caller 往上跳一层，跳过 logger.Info/Warn/Error 封装函数，
+	// 记录真正调用日志的业务代码的文件名和行号。
+	// zap.AddStacktrace(zap.ErrorLevel) 只在 Error 及以上级别打印调用栈，方便排查问题。
+	l := zap.New(core,
+		zap.AddCallerSkip(1),
+		zap.AddStacktrace(zap.ErrorLevel),
+	)
 	global = l
 	return nil
 }

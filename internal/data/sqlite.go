@@ -2,7 +2,7 @@
 //
 // 做的事情：
 //  1. 创建数据库文件目录（不存在则自动建）。
-//  2. 用 GORM 打开 SQLite 连接（WAL 模式 + busy_timeout），关闭 GORM 自带日志。
+//  2. 用 GORM 打开 SQLite 连接（WAL 模式 + busy_timeout），用自定义日志适配器替换 GORM 默认日志。
 //  3. Ping 数据库验证连接可用。
 //  4. 执行版本化迁移（migrateSQLite）。
 //  5. 返回 sqliteRepo 实例给上层使用。
@@ -18,7 +18,6 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	gormlogger "gorm.io/gorm/logger"
 )
 
 // NewSQLite 创建基于 GORM 的 SQLite Repository。
@@ -50,12 +49,12 @@ func NewSQLite(dbPath, migrationsDir string) (Repository, error) {
 	// gorm.Open 打开数据库连接，第一个参数是驱动（这里是 SQLite），第二个参数是配置
 	// sqlite.Open(dsn) 返回一个 GORM 能用的 SQLite 驱动实例
 	// &gorm.Config{} 里配了两样东西：
-	//   - Logger: 关掉 GORM 自带的日志输出，错误由 Repository 方法返回后统一走 pkg/logger 打
-	//     gormlogger.Default.LogMode(gormlogger.Silent) 就是把日志级别设成 Silent，一行都不打
+	//   - Logger: 用自定义适配器 logger.NewGORMLogger() 替换 GORM 默认日志。
+	//     每条 SQL 语句转发到 logger.Debug，开发环境能看到实际执行的 SQL。
 	//   - DisableForeignKeyConstraintWhenMigrating: 关掉 GORM 建表时自动生成外键约束
 	//     我们项目不用数据库外键，免得迁移的时候外键检查报错
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
-		Logger:                                   gormlogger.Default.LogMode(gormlogger.Silent),
+		Logger:                                   logger.NewGORMLogger(),
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	if err != nil {

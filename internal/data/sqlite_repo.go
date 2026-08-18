@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/swallow-sun/swallow-go/pkg/logger"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -48,8 +50,18 @@ func (r *sqliteRepo) CreateUser(ctx context.Context, name, role string) (User, e
 	// 执行完 model 里会回填数据库生成的 ID 和时间字段（GORM 自动干的）
 	// .Error 拿错误信息，没报错就是 nil
 	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
+		logger.Error("users 写入失败",
+			zap.String("name", name),
+			zap.String("role", role),
+			zap.Error(err),
+		)
 		return User{}, fmt.Errorf("insert user: %w", err)
 	}
+
+	// 写库成功后打 Debug 日志，用 zap.Any 打写入后的完整 model
+	logger.Debug("users 写入成功",
+		zap.Any("row", model),
+	)
 
 	// 把 ORM 模型转成业务对象返回，去掉 GORM 的标签和指针类型
 	return userFromORM(model), nil
@@ -62,12 +74,9 @@ func (r *sqliteRepo) GetUser(ctx context.Context, id int64) (User, error) {
 	var model ormUser
 
 	// r.db.WithContext(ctx) 挂上 context
-	// .First(&model, id) 相当于 SELECT * FROM users WHERE id = ? LIMIT 1
-	//   第一个参数 &model 是结果塞进去的地方
-	//   第二个参数 id 是主键值，GORM 会自动拼成 WHERE id = ?
-	// .Error 拿错误
-	// 找不到记录时 GORM 返回 gorm.ErrRecordNotFound，后面 repositoryError 会把它转成 sql.ErrNoRows
-	if err := r.db.WithContext(ctx).First(&model, id).Error; err != nil {
+	// .Select(userColumns) 只查需要的列，不用 SELECT *
+	// .First(&model, id) 相当于 SELECT ... FROM users WHERE id = ? LIMIT 1
+	if err := r.db.WithContext(ctx).Select(userColumns).First(&model, id).Error; err != nil {
 		return User{}, fmt.Errorf("get user %d: %w", id, repositoryError(err))
 	}
 
@@ -82,11 +91,9 @@ func (r *sqliteRepo) GetUserByName(ctx context.Context, name string) (User, erro
 	var model ormUser
 
 	// r.db.WithContext(ctx) 挂上 context
+	// .Select(userColumns) 只查需要的列，不用 SELECT *
 	// .Where("name = ?", name) 加 WHERE 条件，? 是占位符，防 SQL 注入
-	//   GORM 会把 name 的值安全地填进去，不用担心引号注入问题
-	// .First(&model) 查第一条，相当于 LIMIT 1
-	// 找不到时返回 gorm.ErrRecordNotFound，repositoryError 会转成 sql.ErrNoRows
-	if err := r.db.WithContext(ctx).Where("name = ?", name).First(&model).Error; err != nil {
+	if err := r.db.WithContext(ctx).Select(userColumns).Where("name = ?", name).First(&model).Error; err != nil {
 		return User{}, fmt.Errorf("get user by name %q: %w", name, repositoryError(err))
 	}
 
@@ -104,8 +111,15 @@ func (r *sqliteRepo) UpdateUserActive(ctx context.Context, id int64) error {
 	//   相当于 UPDATE users SET last_active_at = ? WHERE id = ?
 	//   time.Now() 拿当前时间
 	if err := r.db.WithContext(ctx).Model(&ormUser{}).Where("id = ?", id).Update("last_active_at", time.Now()).Error; err != nil {
+		logger.Error("users 更新失败",
+			zap.Int64("user_id", id),
+			zap.Error(err),
+		)
 		return fmt.Errorf("update user active: %w", err)
 	}
+	logger.Debug("users 更新成功",
+		zap.Int64("user_id", id),
+	)
 	return nil
 }
 
@@ -120,9 +134,17 @@ func (r *sqliteRepo) CreateSession(ctx context.Context, sessionID string, userID
 	// .Create(&model) 执行 INSERT INTO sessions (id, user_id, status) VALUES (?, ?, ?)
 	// 执行完 GORM 自动回填 StartedAt、LastActiveAt（因为 tag 里写了 autoCreateTime）
 	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
+		logger.Error("sessions 写入失败",
+			zap.String("session_id", sessionID),
+			zap.Int64("user_id", userID),
+			zap.Error(err),
+		)
 		return Session{}, fmt.Errorf("insert session: %w", err)
 	}
 
+	logger.Debug("sessions 写入成功",
+		zap.Any("row", model),
+	)
 	return sessionFromORM(model), nil
 }
 
@@ -132,11 +154,9 @@ func (r *sqliteRepo) GetSession(ctx context.Context, sessionID string) (Session,
 	// 空的 ORM 模型变量，准备接收查询结果
 	var model ormSession
 
-	// .First(&model, "id = ?", sessionID)
-	//   这里把 WHERE 条件直接塞进 First 的第二个参数，GORM 会自动拼成 WHERE id = ?
-	//   sessionID 是字符串主键
-	// 找不到时返回 gorm.ErrRecordNotFound → repositoryError 转成 sql.ErrNoRows
-	if err := r.db.WithContext(ctx).First(&model, "id = ?", sessionID).Error; err != nil {
+	// .Select(sessionColumns) 只查需要的列
+	// .First(&model, "id = ?", sessionID) 按主键查一条
+	if err := r.db.WithContext(ctx).Select(sessionColumns).First(&model, "id = ?", sessionID).Error; err != nil {
 		return Session{}, fmt.Errorf("get session %s: %w", sessionID, repositoryError(err))
 	}
 
@@ -151,8 +171,15 @@ func (r *sqliteRepo) UpdateSessionActive(ctx context.Context, sessionID string) 
 	// .Update("last_active_at", time.Now()) 更新单个字段
 	//   相当于 UPDATE sessions SET last_active_at = ? WHERE id = ?
 	if err := r.db.WithContext(ctx).Model(&ormSession{}).Where("id = ?", sessionID).Update("last_active_at", time.Now()).Error; err != nil {
+		logger.Error("sessions 更新失败",
+			zap.String("session_id", sessionID),
+			zap.Error(err),
+		)
 		return fmt.Errorf("update session active: %w", err)
 	}
+	logger.Debug("sessions 更新成功",
+		zap.String("session_id", sessionID),
+	)
 	return nil
 }
 
@@ -178,8 +205,21 @@ func (r *sqliteRepo) InsertDialogue(ctx context.Context, sessionID string, userI
 	// .Create(&model) 执行 INSERT，把这条对话消息存进 dialogues 表
 	// 执行完 GORM 自动回填 ID（自增主键）和 Timestamp（autoCreateTime）
 	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
+		logger.Error("dialogues 写入失败",
+			zap.String("session_id", sessionID),
+			zap.Int64("user_id", userID),
+			zap.String("role", role),
+			zap.Int("content_chars", len(content)),
+			zap.String("trace_id", traceID),
+			zap.Error(err),
+		)
 		return Dialogue{}, fmt.Errorf("insert dialogue: %w", err)
 	}
+
+	// 写库成功后打 Debug 日志，用 zap.Any 打写入后的完整 model（含 content、token、timestamp 等所有字段）
+	logger.Debug("dialogues 写入成功",
+		zap.Any("row", model),
+	)
 
 	// 转成业务对象返回，调用的人能拿到 ID 和时间
 	return dialogueFromORM(model), nil
@@ -191,8 +231,9 @@ func (r *sqliteRepo) GetDialogue(ctx context.Context, id int64) (Dialogue, error
 	// 空的 ORM 模型变量
 	var model ormDialogue
 
-	// .First(&model, id) 按主键查一条，相当于 SELECT * FROM dialogues WHERE id = ? LIMIT 1
-	if err := r.db.WithContext(ctx).First(&model, id).Error; err != nil {
+	// .Select(dialogueColumns) 只查需要的列
+	// .First(&model, id) 按主键查一条
+	if err := r.db.WithContext(ctx).Select(dialogueColumns).First(&model, id).Error; err != nil {
 		return Dialogue{}, fmt.Errorf("get dialogue %d: %w", id, repositoryError(err))
 	}
 
@@ -205,12 +246,11 @@ func (r *sqliteRepo) GetDialogueByTraceAndRole(ctx context.Context, traceID, rol
 	// 空的 ORM 模型变量
 	var model ormDialogue
 
-	// 链式查询：
-	//   .Where("trace_id = ? AND role = ?", traceID, role) 加 WHERE 条件，按 traceID 和 role 一起查
-	//   .Order("id DESC") 按自增 ID 倒序排（最新的在前）
-	//   .First(&model) 取第一条
-	// 同一个 traceID + role 理论上只有一条，但保险起见取最新的
-	if err := r.db.WithContext(ctx).
+	// .Select(dialogueColumns) 只查需要的列
+	// .Where("trace_id = ? AND role = ?", traceID, role) 按 traceID 和 role 一起查
+	// .Order("id DESC") 按自增 ID 倒序排（最新的在前）
+	// .First(&model) 取第一条
+	if err := r.db.WithContext(ctx).Select(dialogueColumns).
 		Where("trace_id = ? AND role = ?", traceID, role).
 		Order("id DESC").First(&model).Error; err != nil {
 		return Dialogue{}, fmt.Errorf("get dialogue by trace %s and role %s: %w", traceID, role, repositoryError(err))
@@ -226,14 +266,13 @@ func (r *sqliteRepo) GetRecentDialogues(ctx context.Context, sessionID string, l
 	// 切片变量，准备接收查询结果（GORM 会把多条记录塞进来）
 	var models []ormDialogue
 
-	// 链式查询：
-	//   .Where("session_id = ?", sessionID) 只查这个会话的消息
-	//   .Order("timestamp DESC") 按时间倒序（最新的在前）
-	//   .Order("id DESC") 同一时间戳内按自增 ID 倒序，保证高频连续写入时顺序仍然稳定
-	//   .Limit(limit) 最多取 limit 条
-	//   .Find(&models) 把所有匹配的记录塞进 models 切片
-	//     Find 和 First 的区别：Find 找不到不报错，返回空切片；First 找不到会报 ErrRecordNotFound
-	if err := r.db.WithContext(ctx).Where("session_id = ?", sessionID).
+	// .Select(dialogueColumns) 只查需要的列
+	// .Where("session_id = ?", sessionID) 只查这个会话的消息
+	// .Order("timestamp DESC") 按时间倒序（最新的在前）
+	// .Order("id DESC") 同一时间戳内按自增 ID 倒序，保证高频连续写入时顺序仍然稳定
+	// .Limit(limit) 最多取 limit 条
+	// .Find(&models) 把所有匹配的记录塞进 models 切片
+	if err := r.db.WithContext(ctx).Select(dialogueColumns).Where("session_id = ?", sessionID).
 		Order("timestamp DESC").Order("id DESC").Limit(limit).Find(&models).Error; err != nil {
 		return nil, fmt.Errorf("query dialogues: %w", err)
 	}
@@ -265,8 +304,23 @@ func (r *sqliteRepo) InsertEvent(ctx context.Context, eventType string, userID *
 
 	// .Create(&model) 执行 INSERT，存进 events 表
 	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
+		logger.Error("events 写入失败",
+			zap.String("event_type", eventType),
+			zap.Int64p("user_id", userID),
+			zap.Int64("duration_ms", durationMs),
+			zap.Bool("success", success),
+			zap.String("trace_id", traceID),
+			zap.Int("data_chars", len(data)),
+			zap.Error(err),
+		)
 		return fmt.Errorf("insert event: %w", err)
 	}
+
+	// 写库成功后打 Debug 日志，用 zap.Any 打写入后的完整 model（含 data、duration、timestamp 等所有字段）
+	logger.Debug("events 写入成功",
+		zap.Any("row", model),
+	)
+
 	return nil
 }
 

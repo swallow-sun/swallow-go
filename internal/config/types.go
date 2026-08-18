@@ -20,6 +20,8 @@ type Config struct {
 	Database      DatabaseConfig `toml:"database"`
 	// Auth 对应 [auth] 段，放身份鉴权配置（比如主人令牌）
 	Auth          AuthConfig     `toml:"auth"`
+	// Debug 对应 [debug] 段，放调试配置（如 pprof 端口）
+	Debug         DebugConfig    `toml:"debug"`
 	// LoadedSources 记录实际加载了哪些配置文件，方便排查"配置从哪来的"
 	// toml:"-" 的意思是：这个字段不参与 TOML 解析，不是从配置文件里读的，
 	// 而是代码在加载文件时自己往里 append 的
@@ -42,14 +44,17 @@ type ServerConfig struct {
 
 // LLMConfig 放 LLM 服务连接配置。
 type LLMConfig struct {
+	// Provider 是模型供应商名称，比如 "deepseek"、"openai"、"anthropic"
+	// 写进 model_usages 表的 provider 字段，用来区分是哪家供应商的调用量
+	Provider string `toml:"provider"` // 模型供应商名称，如 "deepseek"、"openai"
 	// BaseURL 是大模型 API 的基础地址，比如 "https://api.openai.com/v1"
 	// 后面的 /chat/completions 等路径由 provider 层自己拼
-	BaseURL string `toml:"base_url"` // LLM 服务的 API 基础地址，如 "https://api.openai.com/v1"
+	BaseURL  string `toml:"base_url"` // LLM 服务的 API 基础地址，如 "https://api.openai.com/v1"
 	// APIKey 是调 LLM 用的密钥
 	// 允许在配置文件里留空，因为运行时会从数据库加密配置里补充
-	APIKey  string `toml:"api_key"`  // 调用 LLM 用的密钥，允许在配置文件中为空（由数据库加密配置补充）
+	APIKey   string `toml:"api_key"`  // 调用 LLM 用的密钥，允许在配置文件中为空（由数据库加密配置补充）
 	// Model 是默认用的模型名，比如 "gpt-4o"、"deepseek-chat"
-	Model   string `toml:"model"`    // 默认模型名，如 "gpt-4o"
+	Model    string `toml:"model"`    // 默认模型名，如 "gpt-4o"
 }
 
 // DatabaseConfig 放数据库连接配置。
@@ -67,4 +72,14 @@ type AuthConfig struct {
 	// OwnerToken 是主人令牌，调接口时用这个来证明"我是主人"
 	// 允许在配置文件里留空，运行时会从数据库加密配置里补充
 	OwnerToken string `toml:"owner_token"` // 主人令牌，用于鉴权（允许为空，由数据库加密配置补充）
+}
+
+// DebugConfig 放调试配置。
+// 当前只有一个字段 PProfPort：pprof HTTP 服务监听端口。
+// PProfPort=0 表示不启动 pprof；非 0 时会在该端口启动一个标准库的 pprof server。
+// pprof 用于排查内存泄漏、goroutine 泄漏、CPU 热点等问题。
+type DebugConfig struct {
+	// PProfPort 是 pprof HTTP 服务的监听端口，0 表示不启动
+	// 开发时设成非 0（如 6060），然后用 go tool pprof http://localhost:6060/debug/pprof/heap 抓堆快照
+	PProfPort int `toml:"pprof_port"` // pprof HTTP 端口，0=不启动
 }

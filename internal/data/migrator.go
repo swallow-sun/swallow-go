@@ -63,10 +63,10 @@ func migrateSQLite(ctx context.Context, db *gorm.DB, migrationsDir string) error
 
 // loadMigrations 加载 NNNN_name.sql 文件，并为内容计算 SHA-256 校验值。
 func loadMigrations(dir string) ([]Migration, error) {
-	// 打开 script/migrations/ 目录，拿到里面所有文件和子目录的列表。目录不存在或没权限就报错返回
+	// 打开 script/migrations/ 目录，拿到里面所有文件和子目录的列表
+	// 目录不存在或没权限就报错返回
 	entries, err := os.ReadDir(dir)
 
-	// 拿到里面所有文件和子目录的列表。目录不存在或没权限就报错返回
 	if err != nil {
 		return nil, fmt.Errorf("read migrations dir %s: %w", dir, err)
 	}
@@ -193,11 +193,10 @@ func applyMigration(ctx context.Context, db *gorm.DB, migration Migration) error
 	var existing MigrationRecord
 
 	// 查 schema_migrations 表里有没有这个版本号的记录
-	// .WithContext(ctx) 把 context 传进去，支持超时取消
-	// .Where("version = ?", migration.Version) SQL 的 WHERE 条件，? 是占位符（防 SQL 注入）
-	// .Take(&existing) 查一条记录，塞进 existing 变量里
-	// .Error 取错误信息
-	err := db.WithContext(ctx).Where("version = ?", migration.Version).Take(&existing).Error
+	// .Select(migrationRecordColumns) 只查需要的列，不用 SELECT *
+	// .Where("version = ?", migration.Version) 按 version 查
+	// .Take(&existing) 查一条记录，找不到不报错（返回空结构体）
+	err := db.WithContext(ctx).Select(migrationRecordColumns).Where("version = ?", migration.Version).Take(&existing).Error
 
 	// 查到了，而且已经执行完了
 	if err == nil && existing.Status == MigrationStatusCompleted {
