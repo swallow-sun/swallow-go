@@ -16,40 +16,64 @@ import (
 )
 
 // NewHertzAdapter 创建直接使用项目全局 logger 的 Hertz 日志适配器。
+// 返回的 *HertzAdapter 实现了 hlog.FullLogger 接口，可以替换 Hertz 默认的日志输出。
 func NewHertzAdapter() *HertzAdapter {
+	// 默认级别设为 Debug，开发环境输出所有级别的日志
 	level := hlog.LevelDebug
 	if IsProduction() {
+		// 生产环境改成 Info，过滤掉 Debug 和 Trace 级别（太吵了）
 		level = hlog.LevelInfo
 	}
+	// 构造适配器，把级别存进去
 	return &HertzAdapter{level: level}
 }
 
 // enabled 判断 Hertz 日志级别是否达到当前环境允许输出的最低级别。
+// hlog 的级别是数字常量，数字越大级别越高：
+//   LevelTrace(0) < LevelDebug(1) < LevelInfo(2) < LevelNotice(3)
+//   < LevelWarn(4) < LevelError(5) < LevelFatal(6)
+// 如果传进来的 level >= l.level，说明这条日志级别够高，允许输出。
+// 比如当前 l.level 是 Info(2)，那么 Debug(1) < 2 就不输出，Info(2) >= 2 就输出。
 func (l *HertzAdapter) enabled(level hlog.Level) bool { return level >= l.level }
 
 // write 为所有 Hertz 日志方法的唯一出口，负责级别过滤、来源标识和统一转发。
+// level 是这条日志的级别，message 是日志内容。
 func (l *HertzAdapter) write(level hlog.Level, message string) {
+	// 先判断这条日志级别够不够高，不够就直接 return，不打
 	if !l.enabled(level) {
 		return
 	}
+	// 在消息前面加上 "HERTZ: " 前缀，这样看日志的时候一眼能分清
+	// 哪些是业务代码打的，哪些是 Hertz 框架内部打的
 	message = "HERTZ: " + message
+	// 按 Hertz 的级别映射到我们项目 logger 的级别
+	// Hertz 有 7 个级别，我们项目只有 4 个（Debug/Info/Warn/Error），需要合并
 	switch level {
 	case hlog.LevelTrace, hlog.LevelDebug:
+		// Hertz 的 Trace 和 Debug 都映射到我们的 Debug
 		Debug(message)
 	case hlog.LevelInfo, hlog.LevelNotice:
+		// Hertz 的 Info 和 Notice 都映射到我们的 Info
 		Info(message)
 	case hlog.LevelWarn:
+		// Hertz 的 Warn 直接映射到我们的 Warn
 		Warn(message)
 	case hlog.LevelError:
+		// Hertz 的 Error 直接映射到我们的 Error
 		Error(message)
 	case hlog.LevelFatal:
+		// Fatal 是最严重的：打完日志后 zap 会调 os.Exit(1) 直接退出进程
+		// 用 L() 而不是 Error()，因为 Fatal 要触发进程退出
 		L().Fatal(message)
 	default:
+		// 理论上不会走到这里，保底按 Warn 输出
 		Warn(message)
 	}
 }
 
 // Trace 接收 Hertz 最细粒度的跟踪日志，并按 Debug 级别转发。
+// v ...interface{} 是可变参数，Hertz 把要打印的东西一个个传进来。
+// fmt.Sprint(v...) 把这些参数拼成一个字符串，再交给 write 去转发。
 func (l *HertzAdapter) Trace(v ...interface{}) { l.write(hlog.LevelTrace, fmt.Sprint(v...)) }
 
 // Debug 接收 Hertz 开发诊断日志；生产环境会过滤此级别。
@@ -71,6 +95,8 @@ func (l *HertzAdapter) Error(v ...interface{}) { l.write(hlog.LevelError, fmt.Sp
 func (l *HertzAdapter) Fatal(v ...interface{}) { l.write(hlog.LevelFatal, fmt.Sprint(v...)) }
 
 // Tracef 格式化并转发 Hertz 跟踪日志。
+// fmt.Sprintf(format, v...) 按 format 模板把参数格式化成字符串，
+// 比如 fmt.Sprintf("user=%s", "alice") → "user=alice"
 func (l *HertzAdapter) Tracef(format string, v ...interface{}) {
 	l.write(hlog.LevelTrace, fmt.Sprintf(format, v...))
 }
@@ -106,6 +132,9 @@ func (l *HertzAdapter) Fatalf(format string, v ...interface{}) {
 }
 
 // CtxTracef 实现 Hertz 上下文跟踪日志接口；当前公共字段由全局 logger 带上。
+// 第一个参数 _ context.Context 用下划线丢掉，因为我们不需要从 ctx 里取东西——
+// trace ID 等公共字段在全局 logger 里已经通过 AddFields 带上了。
+// Hertz 框架要求这个方法签名必须接收 context，所以参数要留着，只是不用。
 func (l *HertzAdapter) CtxTracef(_ context.Context, format string, v ...interface{}) {
 	l.Tracef(format, v...)
 }
@@ -141,9 +170,18 @@ func (l *HertzAdapter) CtxFatalf(_ context.Context, format string, v ...interfac
 }
 
 // SetLevel 接收 Hertz 的动态级别设置，并更新适配器的最低输出级别。
+// Hertz 框架在运行时可能调这个方法来动态调整日志级别，我们把它的级别存下来。
 func (l *HertzAdapter) SetLevel(level hlog.Level) { l.level = level }
 
 // SetOutput 保留 Hertz 接口兼容性；输出目标由项目 logger 统一管理。
+// Hertz 默认有一个日志输出目标（比如文件或 stdout），但我们的日志走全局 logger 统一管理，
+// 所以这个方法什么都不做（空函数体），纯粹是为了满足 hlog.FullLogger 接口的要求。
+// 参数 _ io.Writer 用下划线丢掉，因为我们不使用它。
 func (l *HertzAdapter) SetOutput(_ io.Writer) {}
 
+// 这行代码是编译期的接口检查：
+// var _ hlog.FullLogger = (*HertzAdapter)(nil)
+// 意思是声明一个空变量，类型是 hlog.FullLogger，赋值为一个 nil 指针转换成的 *HertzAdapter。
+// 如果 *HertzAdapter 没有完整实现 hlog.FullLogger 接口的所有方法，编译就会报错。
+// 这是一种"编译期接口合规检查"的惯用写法，运行时不产生任何开销。
 var _ hlog.FullLogger = (*HertzAdapter)(nil)

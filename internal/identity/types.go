@@ -7,6 +7,7 @@ package identity
 import "github.com/swallow-sun/swallow-go/internal/data"
 
 // Manager 管理用户和会话。
+// 只持有一个 repo 字段（data.Repository 接口），所有数据库操作都通过它来做。
 type Manager struct {
 	repo data.Repository
 }

@@ -58,7 +58,11 @@ func (s *ChatService) Chat(ctx context.Context, sessionID, clientMessageID, mess
 	}
 
 	// 整轮聊天共用同一个超时上下文和 trace ID。
+	// context.WithTimeout 基于父 ctx 派生一个子 ctx，到 60 秒自动取消
+	// 返回值 cancel 是取消函数，用完要调，不然 60 秒的定时器不会释放
 	chatCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	// trace.Ensure 检查 chatCtx 里有没有 trace ID，没有就生成一个塞进去
+	// 返回值 chatCtx 是塞了 trace ID 的上下文，traceID 是取出来的 ID 字符串
 	chatCtx, traceID := trace.Ensure(chatCtx)
 
 	// 在调模型前先占用幂等键。如果记录已经存在了，绝不能再调一次模型。
@@ -123,10 +127,12 @@ func (s *ChatService) Chat(ctx context.Context, sessionID, clientMessageID, mess
 	}
 
 	// 创建事件 channel，handler 从这里读事件转 SSE。
-	// 缓冲大小 64：LLM 的 chunk 通常比较小但频率高，适当缓冲免得 handler 写 SSE 慢了把 service 堵住。
+	// make(chan ChatEvent, 64) 开一个带 64 个位置缓冲的 channel
+	// 缓冲大小 64：LLM 的 chunk 通常比较小但频率高，适当缓冲免得 handler 写 SSE 慢了把 service 堵住
 	events := make(chan ChatEvent, 64)
 
-	// 启动协程跑流式读取循环，把 chunk 一个一个发到 channel。
+	// go 关键字启动一个新协程（轻量级线程），在后台跑 streamLoop
+	// 主协程直接返回 events channel 给 handler，handler 和 streamLoop 并行工作
 	go s.streamLoop(chatCtx, ag, streamReader, chatRequest, events, traceID, cancel)
 
 	return events, nil
@@ -145,13 +151,19 @@ func (s *ChatService) streamLoop(
 	traceID string,
 	cancel context.CancelFunc,
 ) {
-	// 无论怎么退出，都要关闭 streamReader、cancel 超时上下文、关闭 channel
+	// defer 把这个匿名函数推迟到 streamLoop return 时执行
+	// 无论下面是正常结束还是中途出错，defer 里的代码一定会跑
+	// 这里做三件事：关 streamReader、cancel 超时上下文、关 channel
 	defer func() {
+		// 关掉 LLM 流式读取器，释放底层 HTTP 连接
 		if err := streamReader.Close(); err != nil {
 			// 关闭失败只打 Warn（不是 Error），因为不影响主流程
 			logger.Warn("关闭 LLM 流失败", zap.Error(err), zap.String("trace_id", traceID))
 		}
+		// cancel() 取消 60 秒的超时上下文，释放定时器资源
 		cancel()
+		// close(events) 关闭 channel，告诉 handler 事件全发完了
+		// handler 那边 for range events 会自动退出循环
 		close(events)
 	}()
 
@@ -160,12 +172,18 @@ func (s *ChatService) streamLoop(
 	// 同时用 replyBuilder 把所有 chunk 拼起来，等流结束了一次性存数据库
 	var replyBuilder strings.Builder
 
+	// for {} 是一个死循环，不停从 LLM 读 chunk，直到读完或出错才跳出
 	for {
-		// 检查客户端有没有断开（handler 那边 ctx cancel 会传到 chatCtx）
+		// select 是 Go 的多路复用，同时监听多个 channel
+		// 这里只监听一个 chatCtx.Done()，配合 default 实现非阻塞检查
 		select {
+		// chatCtx.Done() 返回一个 channel，ctx 被取消时这个 channel 会被关闭
+		// <-chatCtx.Done() 从这个 channel 读，读到了说明客户端断了或超时了
 		case <-chatCtx.Done():
 			s.failChatRequest(chatRequest.ID, traceID, ChatErrorClientClosed)
 			return
+		// default 表示上面的 case 没就绪就立即执行
+		// 也就是说客户端没断就继续往下读 LLM
 		default:
 		}
 
@@ -180,6 +198,8 @@ func (s *ChatService) streamLoop(
 			s.failChatRequest(chatRequest.ID, traceID, ChatErrorStreamRead)
 			logger.Error("读取 LLM 流失败", zap.Error(err), zap.String("trace_id", traceID))
 			// 告诉客户端这次流式响应失败了
+			// sendEvent 把事件发到 channel，handler 读到后转 SSE 写给客户端
+			// 这里 Content 为空，客户端收到后知道这次回复失败了
 			sendEvent(events, ChatEvent{Type: ChatEventMessage, Content: "", TraceID: traceID})
 			return
 		}
@@ -189,7 +209,7 @@ func (s *ChatService) streamLoop(
 			break
 		}
 
-		// 把这次读到的 chunk 拼到 replyBuilder 里，等会儿存数据库
+		// WriteString 把 chunk 追加到 replyBuilder 内部的 buffer 里
 		replyBuilder.WriteString(chunk)
 
 		// 把 chunk 发到 channel，handler 读到后转 SSE 写给客户端
@@ -198,13 +218,17 @@ func (s *ChatService) streamLoop(
 
 	// ===== 流式读取结束，下面是收尾工作 =====
 
-	// 完整读取后，取得 token 用量和性能指标。
+	// 完整读取后，取 token 用量和性能指标。
+	// Usage() 返回 LLM 报告的 token 用量（输入/输出/缓存等）
 	usage := streamReader.Usage()
+	// GetStreamMetrics 从 streamReader 里提取性能指标（首 token 耗时、总耗时等）
 	metrics := agent.GetStreamMetrics(streamReader)
 
 	// 用原来的 trace ID 保存助手回复。
 	// 这里新建一个 context.Background() 而不是复用上面的 chatCtx，
 	// 因为 chatCtx 有 60 秒超时，可能快到期了。
+	// context.Background() 返回一个空的 context，没有超时、不会被取消
+	// trace.WithID 把 traceID 塞进这个空 context 里，这样日志还能关联到这次请求
 	finishCtx := trace.WithID(context.Background(), traceID)
 
 	// 调 Agent 的 FinishStream 方法，把完整回复 + token 用量 + 性能指标存进数据库
@@ -215,11 +239,14 @@ func (s *ChatService) streamLoop(
 	}
 
 	// 助手消息已经存进数据库后再完成幂等请求。两步之间如果进程断了，重试时会按 trace 恢复状态。
+	// GetDialogueByTraceAndRole 按 trace ID 和角色查对话记录
+	// string(llm.RoleAssistant) 把枚举转成字符串 "assistant"
 	assistantDialogue, err := s.deps.repo.GetDialogueByTraceAndRole(finishCtx, traceID, string(llm.RoleAssistant))
 	if err != nil {
 		logger.Error("读取已保存助手消息失败", zap.Error(err), zap.String("trace_id", traceID))
 		return
 	}
+	// CompleteChatRequest 把幂等请求状态从 running 改成 completed，同时记录助手消息 ID
 	if err := s.deps.repo.CompleteChatRequest(finishCtx, chatRequest.ID, assistantDialogue.ID); err != nil {
 		logger.Error("完成聊天请求状态失败", zap.Error(err), zap.String("trace_id", traceID))
 		return
@@ -228,17 +255,19 @@ func (s *ChatService) streamLoop(
 	// 刷新会话最后活跃时间（更新数据库 sessions 表的 updated_at）
 	s.deps.idm.TouchSession(finishCtx, chatRequest.SessionID)
 
-	// 把最终的 token 用量和性能指标发给客户端
+	// 把最终的 token 用量和性能指标组装成 UsageData，发给客户端
+	// &UsageData{...} 取结构体的指针，这样 Usage 字段引用的是同一份数据
 	usageData := &UsageData{
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
-		CacheHitTokens:    usage.CacheHitTokens(),
-		CacheMissTokens:   usage.CacheMissTokens(),
-		ReasoningTokens:   usage.CompletionTokensDetails.ReasoningTokens,
+		CacheHitTokens:    usage.CacheHitTokens(),   // 缓存命中算出来的
+		CacheMissTokens:   usage.CacheMissTokens(),   // 缓存未命中算出来的
+		ReasoningTokens:   usage.CompletionTokensDetails.ReasoningTokens, // 思维链 token 数
 		TotalTokens:       usage.TotalTokens,
-		FirstTokenMs:      metrics.FirstTokenMs,
-		TotalDurationMs:   metrics.TotalDurationMs,
+		FirstTokenMs:      metrics.FirstTokenMs,    // 首 token 耗时（毫秒）
+		TotalDurationMs:   metrics.TotalDurationMs, // 总耗时（毫秒）
 	}
+	// 通过 ChatEventUsage 事件发给 handler，handler 转成 SSE usage 帧写给客户端
 	sendEvent(events, ChatEvent{Type: ChatEventUsage, Usage: usageData, TraceID: traceID})
 
 	// 所有操作成功后才发送 done 事件。
@@ -273,7 +302,10 @@ func (s *ChatService) handleExistingChatRequest(ctx context.Context, request dat
 					zap.String("trace_id", request.TraceID),
 				)
 			}
-		} else if !errors.Is(err, sql.ErrNoRows) {
+			// errors.Is(err, sql.ErrNoRows) 判断 err 是不是 "查不到记录" 这个错误
+			// sql.ErrNoRows 是 Go 标准库 database/sql 里定义的，表示查询结果为空
+			// !errors.Is(...) 取反：不是 "查不到"，说明是真正的数据库错误（连接断了等）
+			} else if !errors.Is(err, sql.ErrNoRows) {
 			// 不是"没找到"而是真正的数据库错误
 			logger.Error("查询助手消息以恢复聊天请求状态失败",
 				zap.Error(err),
@@ -284,7 +316,7 @@ func (s *ChatService) handleExistingChatRequest(ctx context.Context, request dat
 		// err == sql.ErrNoRows 时静默：说明模型还没回完就崩了，走 default 返回 running
 	}
 
-	// 根据最终状态决定如何响应
+	// switch 根据请求状态走不同分支，跟 if-else 链类似但更清晰
 	switch request.Status {
 	case data.ChatRequestStatusCompleted:
 		// 标记已完成但找不到助手消息 ID，数据不一致
@@ -296,6 +328,7 @@ func (s *ChatService) handleExistingChatRequest(ctx context.Context, request dat
 			return nil, NewChatError(409, ChatErrorResultMissing, request.TraceID)
 		}
 		// 按 ID 读出上次的助手回复，通过 SSE 重放给客户端
+		// *request.AssistantDialogueID 是指针解引用，把 *int64 取出 int64 值
 		dialogue, err := s.deps.repo.GetDialogue(ctx, *request.AssistantDialogueID)
 		if err != nil {
 			logger.Error("读取幂等聊天结果失败",
@@ -309,8 +342,10 @@ func (s *ChatService) handleExistingChatRequest(ctx context.Context, request dat
 			zap.Int64("request_id", request.ID),
 			zap.String("trace_id", request.TraceID),
 		)
-		// 用缓冲 channel 装 3 个重放事件，直接 close 让 handler 读完
+		// 用缓冲 channel 装 3 个重放事件，缓冲大小 3 刚好够放
+		// make(chan ChatEvent, 3) 开一个带 3 个位置缓冲的 channel
 		events := make(chan ChatEvent, 3)
+		// <- 是往 channel 里塞值，塞满 3 个位置后不会阻塞（因为缓冲够用）
 		events <- ChatEvent{Type: ChatEventMessage, Content: dialogue.Content, Replayed: true, TraceID: request.TraceID}
 		events <- ChatEvent{
 			Type: ChatEventUsage,
@@ -326,12 +361,16 @@ func (s *ChatService) handleExistingChatRequest(ctx context.Context, request dat
 			TraceID:  request.TraceID,
 		}
 		events <- ChatEvent{Type: ChatEventReplayDone, Replayed: true, TraceID: request.TraceID}
+		// close(events) 关闭 channel，告诉 handler 重放事件发完了
+		// handler 那边 for range events 读完后自动退出
 		close(events)
 		return events, nil
 
 	case data.ChatRequestStatusFailed:
 		// 上次失败了，返回上次的错误码
 		code := ChatErrorRequestFailed
+		// request.ErrorCode 是 *string（指针），可能为 nil（没存错误码）
+		// 先判 nil 再解引用，避免空指针 panic
 		if request.ErrorCode != nil && *request.ErrorCode != "" {
 			code = *request.ErrorCode
 		}
@@ -357,6 +396,8 @@ func (s *ChatService) handleExistingChatRequest(ctx context.Context, request dat
 // 用 context.Background() 而不是 chatCtx，因为 chatCtx 可能在超时后已被取消，
 // 但失败标记必须写入数据库，否则重试时无法知道上次是失败的。
 func (s *ChatService) failChatRequest(requestID int64, traceID, code string) {
+	// FailChatRequest 把幂等请求状态改成 failed，同时记录错误码
+	// 用 context.Background() 而不是传进来的 ctx，因为 ctx 可能已经超时取消了
 	if err := s.deps.repo.FailChatRequest(context.Background(), requestID, code); err != nil {
 		logger.Error("记录聊天请求失败状态失败",
 			zap.Error(err),
@@ -376,6 +417,10 @@ func (s *ChatService) failChatRequest(requestID int64, traceID, code string) {
 // sendEvent 向 channel 发送事件，带 panic 保护。
 // channel 关闭后发送会 panic，用 recover 兜住防止协程崩溃。
 func sendEvent(events chan<- ChatEvent, event ChatEvent) {
+	// defer + recover 兜住 panic
+	// 如果 events channel 已经被 close 了，往里面塞值会 panic
+	// recover() 把 panic 接住，防止协程崩溃导致整个程序挂掉
 	defer func() { _ = recover() }()
+	// events <- event 往 channel 里塞一个事件
 	events <- event
 }

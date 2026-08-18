@@ -23,7 +23,9 @@ import (
 
 // 以下常量是 chat 接口在鉴权/幂等校验失败时返回给客户端的稳定错误码。
 // 客户端根据错误码判断是重试、换 session 还是直接展示错误。
+// const ( ... ) 是一组常量的集合声明，每个常量代表一种错误场景
 const (
+	// 下面每个常量都是 string 类型，值就是错误码字符串
 	ChatErrorAgentInit      = "agent_init_failed"        // Agent 创建失败（系统提示词文件缺失等）
 	ChatErrorConnect        = "llm_connect_failed"       // LLM 流式连接失败（网络/鉴权问题）
 	ChatErrorStreamRead     = "llm_stream_read_failed"   // 流式读取中途出错（连接断开等）
@@ -42,23 +44,32 @@ const (
 // ChatError 是 service 层返回给 handler 的业务错误。
 // handler 拿到后直接用 StatusCode 做 HTTP 响应码，用 Code 做业务错误码。
 // chat 接口的幂等冲突也走这个结构（StatusCode=409）。
+// ChatError 实现了 Error() string 方法，所以它满足 Go 的 error 接口
 type ChatError struct {
 	StatusCode int    // HTTP 状态码：400（请求参数问题）、409（幂等冲突）、500（内部错误）
 	Code       string // 稳定错误码，客户端据此判断怎么处理
 	TraceID    string // 关联的 trace ID，写入响应体供排查
 }
 
+// Error 方法让 ChatError 满足 Go 的 error 接口。
+// error 接口只有一个方法 Error() string，任何类型只要实现了这个方法就能当 error 用
 func (e *ChatError) Error() string { return e.Code }
 
 // NewChatError 创建一个 ChatError，用于 handler 直接映射 HTTP 响应。
+// 返回 *ChatError 是指针，避免结构体拷贝
 func NewChatError(statusCode int, code, traceID string) *ChatError {
+	// &ChatError{...} 取结构体字面量的指针，返回堆上的地址
 	return &ChatError{StatusCode: statusCode, Code: code, TraceID: traceID}
 }
 
 // FromChatError 尝试把 error 转成 *ChatError，不是就返回 nil。
 // handler 用这个判断是不是业务错误（需要带 code 响应），还是内部错误（统一 500）。
 func FromChatError(err error) *ChatError {
+	// 声明一个 *ChatError 类型的变量 ce，初始值为 nil
 	var ce *ChatError
+	// errors.As 是 Go 标准库 errors 包里的函数
+	// 它检查 err 链上有没有 *ChatError 类型，有就塞进 ce 并返回 true
+	// 举个例子，err 是 fmt.Errorf("...: %w", chatErr) 包装过的，errors.As 能剥开包装找到里面的 *ChatError
 	if errors.As(err, &ce) {
 		return ce
 	}
@@ -66,13 +77,17 @@ func FromChatError(err error) *ChatError {
 }
 
 // ChatEventType 标识 SSE 事件的类型，handler 根据它决定写哪个 SSE event 名。
+// 用 int 类型而不是 string，因为 int 比较比 string 快
 type ChatEventType int
 
+// const ( ... iota ) 是 Go 的枚举写法
+// iota 是 Go 的常量计数器，从 0 开始，每出现一行 const 自动 +1
+// iota + 1 让值从 1 开始（0 在 Go 里常表示"零值"，不方便区分"未设置"和"第一个"）
 const (
-	ChatEventMessage ChatEventType = iota + 1 // 消息内容片段
-	ChatEventUsage                           // token 用量和性能指标
-	ChatEventDone                            // 正常结束
-	ChatEventReplayDone                      // 幂等重放结束（区别于正常 done）
+	ChatEventMessage ChatEventType = iota + 1 // 消息内容片段，值为 1
+	ChatEventUsage                           // token 用量和性能指标，值为 2
+	ChatEventDone                            // 正常结束，值为 3
+	ChatEventReplayDone                      // 幂等重放结束（区别于正常 done），值为 4
 )
 
 // ChatEvent 是 service 通过 channel 发给 handler 的事件。
@@ -131,6 +146,7 @@ type HistoryResult struct {
 // Deps 是三个 Service 共用的底层依赖集合。
 // service 层不自己创建 repo/idm/mem/llm，而是由 handler 层的 NewDeps 组装好后传进来。
 // 字段是小写（包外不可见），外部通过 NewDeps 构造函数创建。
+// 小写字段意味着 biz/service 包外面不能直接改这些字段，保证依赖组装只在 NewDeps 里做
 type Deps struct {
 	cfg  *config.Config
 	repo data.Repository
@@ -141,12 +157,13 @@ type Deps struct {
 
 // NewDeps 创建 service 层的依赖集合。
 // 由 handler 层的 NewDeps 调，把底层依赖传进来。
+// 返回 *Deps 是指针，这样所有用到 Deps 的地方共用同一份实例
 func NewDeps(cfg *config.Config, repo data.Repository, idm *identity.Manager, mem *memory.Store, llm llm.Provider) *Deps {
 	return &Deps{
-		cfg:  cfg,
-		repo: repo,
-		idm:  idm,
-		mem:  mem,
-		llm:  llm,
+		cfg:  cfg,  // 配置
+		repo: repo, // 数据仓库接口
+		idm:  idm,  // 身份管理器
+		mem:  mem,  // 记忆存储
+		llm:  llm,  // LLM 客户端
 	}
 }
