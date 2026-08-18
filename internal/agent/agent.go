@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/swallow-sun/swallow-go/internal/memory"
+	"github.com/swallow-sun/swallow-go/internal/metrics"
 	"github.com/swallow-sun/swallow-go/internal/provider/llm"
 	"github.com/swallow-sun/swallow-go/internal/telemetry"
 	"github.com/swallow-sun/swallow-go/internal/trace"
@@ -36,9 +37,10 @@ import (
 // 适合快速测试，重启丢历史。
 // 参数：
 //   - provider: LLM 提供方（如 OpenAI 兼容客户端）
+//   - providerName: 供应商名称（如 "deepseek"），给 metrics 标签用
 //   - model: 模型名，如 "gpt-4o"
 //   - systemPromptPath: 系统提示词文件路径
-func New(provider llm.Provider, model string, systemPromptPath string) (*Agent, error) {
+func New(provider llm.Provider, providerName, model, systemPromptPath string) (*Agent, error) {
 	// 读系统提示词文件，拿到文件内容（字节切片）
 	// os.ReadFile 读整个文件，返回 []byte 和 error
 	prompt, err := os.ReadFile(systemPromptPath)
@@ -51,6 +53,7 @@ func New(provider llm.Provider, model string, systemPromptPath string) (*Agent, 
 	// memMsgs 初始化成只有一条 system prompt 消息
 	return &Agent{
 		provider:     provider,
+		providerName: providerName,
 		model:        model,
 		systemPrompt: string(prompt), // 把字节切片转成字符串
 		memMsgs: []llm.ChatMessage{
@@ -64,12 +67,13 @@ func New(provider llm.Provider, model string, systemPromptPath string) (*Agent, 
 // sessionID 和 userID 用于写 dialogues 表。
 // 参数：
 //   - provider: LLM 提供方
+//   - providerName: 供应商名称（如 "deepseek"），给 metrics 标签用
 //   - model: 模型名
 //   - systemPromptPath: 系统提示词文件路径
 //   - mem: 记忆存储，负责读写 SQLite 里的对话历史
 //   - sessionID: 会话 ID，标识当前对话
 //   - userID: 用户 ID，标识谁在说话
-func NewWithDB(provider llm.Provider, model string, systemPromptPath string, mem *memory.Store, sessionID string, userID int64) (*Agent, error) {
+func NewWithDB(provider llm.Provider, providerName, model, systemPromptPath string, mem *memory.Store, sessionID string, userID int64) (*Agent, error) {
 	// 读系统提示词文件
 	prompt, err := os.ReadFile(systemPromptPath)
 	if err != nil {
@@ -80,6 +84,7 @@ func NewWithDB(provider llm.Provider, model string, systemPromptPath string, mem
 	// mem 不为 nil，对话历史存 DB；memMsgs 为空切片（DB 模式不用它）
 	return &Agent{
 		provider:     provider,
+		providerName: providerName,
 		model:        model,
 		systemPrompt: string(prompt),
 		mem:          mem,
@@ -188,6 +193,8 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (llm.ChatResponse, e
 			telemetry.FieldDurationMS: elapsed.Milliseconds(),
 			"error":  err.Error(),
 		})
+		// Prometheus 指标：记录一次失败的模型调用（Token 用量全 0，因为没拿到回复）
+		metrics.RecordModelCall(a.providerName, a.model, metrics.StatusFailed, 0, 0, 0, 0)
 		return llm.ChatResponse{}, err
 	}
 
@@ -210,6 +217,14 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (llm.ChatResponse, e
 	// 5. 持久化（user + assistant 两条都写 DB）
 	// saveMessages 把用户输入和模型回复都存进 DB（或内存切片）
 	// 用户消息的 usage 传空值（Usage{}），因为用户输入不消耗 token
+	// Prometheus 指标：记录一次成功的模型调用，包含各类 Token 用量
+	metrics.RecordModelCall(
+		a.providerName, resp.Model, metrics.StatusOK,
+		float64(resp.Usage.PromptTokens),     // 输入 Token
+		float64(resp.Usage.CompletionTokens),  // 输出 Token
+		float64(resp.Usage.CacheHitTokens()),   // 缓存命中输入 Token
+		float64(resp.Usage.CompletionTokensDetails.ReasoningTokens), // 推理 Token
+	)
 	if err := a.saveMessages(ctx, userInput, resp.Content, resp.Usage); err != nil {
 		logger.Error("非流式对话消息持久化失败",
 			zap.Error(err),
@@ -295,6 +310,8 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string) (llm.StreamRea
 			telemetry.FieldDurationMS: time.Since(start).Milliseconds(),
 			"error":  err.Error(),
 		})
+		// Prometheus 指标：流式连接失败，Token 全 0
+		metrics.RecordModelCall(a.providerName, a.model, metrics.StatusFailed, 0, 0, 0, 0)
 		return nil, err
 	}
 	// 连接成功后保存用户消息。如果保存失败要关闭已经建立的流式连接。
@@ -339,19 +356,19 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string) (llm.StreamRea
 //   - ctx: 上下文
 //   - fullContent: 完整的回复文本（调用方把所有 chunk 拼起来的）
 //   - usage: token 用量（从 reader.Usage() 拿到）
-//   - metrics: 流式性能指标（从 GetStreamMetrics 拿到）
+//   - streamMetrics: 流式性能指标（从 GetStreamMetrics 拿到）
 //
 // 返回值：错误
-func (a *Agent) FinishStream(ctx context.Context, fullContent string, usage llm.Usage, metrics StreamMetrics) error {
+func (a *Agent) FinishStream(ctx context.Context, fullContent string, usage llm.Usage, streamMetrics StreamMetrics) error {
 	// 计算每秒输出 token 数（tokens per second）
 	// 举例：生成 100 个 token 花了 5 秒 → 100 / (5000/1000) = 20 tokens/s
 	tokensPerSecond := 0.0
-	if metrics.TotalDurationMs > 0 {
+	if streamMetrics.TotalDurationMs > 0 {
 		// float64(usage.CompletionTokens): 输出 token 数
-		// float64(metrics.TotalDurationMs) / 1000: 把毫秒转成秒
+		// float64(streamMetrics.TotalDurationMs) / 1000: 把毫秒转成秒
 		tokensPerSecond =
 			float64(usage.CompletionTokens) /
-				(float64(metrics.TotalDurationMs) / 1000)
+				(float64(streamMetrics.TotalDurationMs) / 1000)
 	}
 	// 发埋点：记录流式调用完成，包含性能指标和 token 用量
 	// first_token_ms: 第一个 token 的等待时间（体现响应速度）
@@ -360,8 +377,8 @@ func (a *Agent) FinishStream(ctx context.Context, fullContent string, usage llm.
 	telemetry.Emit(ctx, telemetry.EventLLMStreamComplete, map[string]any{
 		"model":             a.model,
 		telemetry.FieldStatus: telemetry.StatusOK,
-		"first_token_ms":    metrics.FirstTokenMs,
-		"total_duration_ms": metrics.TotalDurationMs,
+		"first_token_ms":    streamMetrics.FirstTokenMs,
+		"total_duration_ms": streamMetrics.TotalDurationMs,
 		"tokens_per_second": tokensPerSecond,
 		"prompt_tokens":     usage.PromptTokens,
 		"completion_tokens": usage.CompletionTokens,
@@ -370,6 +387,15 @@ func (a *Agent) FinishStream(ctx context.Context, fullContent string, usage llm.
 		"cache_miss_tokens": usage.CacheMissTokens(),
 		"reasoning_tokens":  usage.CompletionTokensDetails.ReasoningTokens,
 	})
+
+	// Prometheus 指标：流式调用成功结束，记录各类 Token 用量
+	metrics.RecordModelCall(
+		a.providerName, a.model, metrics.StatusOK,
+		float64(usage.PromptTokens),     // 输入 Token
+		float64(usage.CompletionTokens),  // 输出 Token
+		float64(usage.CacheHitTokens()),   // 缓存命中输入 Token
+		float64(usage.CompletionTokensDetails.ReasoningTokens), // 推理 Token
+	)
 
 	// 有 DB 模式：把完整回复和 token 用量存进 DB
 	if a.mem != nil {

@@ -29,3 +29,9 @@ owner_token = ""
 # 抓 goroutine：go tool pprof http://localhost:6060/debug/pprof/goroutine
 # 生产环境保持 0。
 pprof_port = 0
+
+[metrics]
+# Prometheus metrics HTTP 端口，0=不启动。开发时设 9100。
+# curl http://localhost:9100/metrics 能看到所有指标。
+# 生产环境需要 Prometheus 抓取时才开，否则保持 0。
+metrics_port = 0

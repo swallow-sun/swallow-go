@@ -218,13 +218,14 @@ func run() (runErr error) {
 
 	// agent.NewWithDB 创建对话 Agent，参数依次是：
 	// llmProvider：调 LLM 用的 provider
+	// cfg.LLM.Provider：供应商名称，给 metrics 标签用
 	// cfg.LLM.Model：模型名称
 	// "prompts/system.md"：系统提示词文件路径
 	// mem：记忆管理器，用于读写历史消息
 	// sessionID：会话 ID，用于区分不同会话
 	// user.ID：用户 ID，用于区分不同用户
 	ag, err := agent.NewWithDB(
-		llmProvider, cfg.LLM.Model, "prompts/system.md",
+		llmProvider, cfg.LLM.Provider, cfg.LLM.Model, "prompts/system.md",
 		mem, sessionID, user.ID,
 	)
 	if err != nil {

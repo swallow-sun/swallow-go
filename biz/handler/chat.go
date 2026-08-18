@@ -12,10 +12,12 @@ package handler
 
 import (
 	"context"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/swallow-sun/swallow-go/biz/service"
+	"github.com/swallow-sun/swallow-go/internal/metrics"
 	"github.com/swallow-sun/swallow-go/internal/trace"
 	"github.com/swallow-sun/swallow-go/pkg/logger"
 	"go.uber.org/zap"
@@ -26,6 +28,15 @@ import (
 // message 事件传输回答片段，usage 事件传输 Token 用量，
 // error 事件表示流式读取失败，done 事件表示正常结束。
 func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
+	// 记录请求开始时间，defer 里算耗时打 Prometheus 指标
+	start := time.Now()
+	// status 记录这次请求的最终结果（ok/failed/cancelled），
+	// 各退出路径修改它，defer 里统一调 RecordRequest
+	status := metrics.StatusOK
+	defer func() {
+		metrics.RecordRequest(metrics.ComponentGo, "chat", status, float64(time.Since(start).Milliseconds()))
+	}()
+
 	// 声明请求结构体，准备接收客户端传来的 JSON。
 	// chatReq 有三个字段：session_id、client_message_id、message
 	var req chatReq
@@ -38,6 +49,7 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 	if err := c.BindAndValidate(&req); err != nil {
 		// c.JSON 写一个 JSON 响应给客户端，第一个参数是 HTTP 状态码
 		// consts.StatusBadRequest 就是 400
+		status = metrics.StatusFailed
 		c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -46,12 +58,14 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 	// client_message_id 做幂等控制（同一条消息重试时不变），message 是用户说的话。
 	// 缺任何一个都返回 400
 	if req.SessionID == "" || req.ClientMessageID == "" || req.Message == "" {
+		status = metrics.StatusFailed
 		c.JSON(consts.StatusBadRequest, map[string]string{"error": "session_id, client_message_id and message are required"})
 		return
 	}
 	// client_message_id 太长会撑爆数据库字段，限制最大 128 字符
 	// service.MaxClientMessageIDLength 是 service 层定义的常量
 	if len(req.ClientMessageID) > service.MaxClientMessageIDLength {
+		status = metrics.StatusFailed
 		c.JSON(consts.StatusBadRequest, map[string]string{"error": "client_message_id is too long"})
 		return
 	}
@@ -82,6 +96,7 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 			// 业务错误：用 ChatError 里的 StatusCode 做 HTTP 响应码
 			// 比如 409 表示幂等冲突（同一条消息重复发）
 			// retryable=false 告诉客户端不要重试
+			status = metrics.StatusFailed
 			c.JSON(ce.StatusCode, map[string]any{
 				"code":      ce.Code,
 				"message":   "chat request cannot be executed again",
@@ -92,6 +107,7 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 		}
 		// 不是 ChatError 就是内部错误，打日志后统一返回 500 + 笼统信息
 		// 不把内部细节泄露给客户端，防止暴露系统结构
+		status = metrics.StatusFailed
 		logger.Error("聊天服务失败", zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, map[string]string{"error": "chat service failed"})
 		return
@@ -114,6 +130,7 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 			// 客户端断开了，打日志后直接 return，不再读 channel
 			// service 层那边如果还在往 channel 塞数据，会因为没人读而阻塞，
 			// 但 service 层也会监听 ctx，最终一起退出
+			status = metrics.StatusCancelled
 			logger.Info("客户端断开连接，停止读取事件", zap.String("trace_id", event.TraceID))
 			return
 		default:
@@ -136,6 +153,7 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 			// 第一个参数是 Hertz 的 RequestContext，第二个是事件名，第三个是数据
 			if err := writeSSE(c, "message", data); err != nil {
 				// 写失败（客户端已断开等），打日志后直接 return
+				status = metrics.StatusCancelled
 				logger.Error("发送 SSE 消息失败", zap.Error(err), zap.String("trace_id", event.TraceID))
 				return
 			}
@@ -160,6 +178,7 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 					data["replayed"] = true
 				}
 				if err := writeSSE(c, "usage", data); err != nil {
+					status = metrics.StatusCancelled
 					logger.Error("发送 SSE usage 事件失败", zap.Error(err), zap.String("trace_id", event.TraceID))
 					return
 				}

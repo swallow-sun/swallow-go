@@ -100,9 +100,9 @@ func (s *ChatService) Chat(ctx context.Context, sessionID, clientMessageID, mess
 
 	// 每个请求动态创建一个 Agent（sessionID/userID 不同不能复用）。
 	// Agent 里面绑了当前会话的 ID 和用户 ID，所以不能跨请求共用。
-	// NewWithDB 传入：LLM 客户端、模型名、系统提示词文件路径、记忆存储、会话 ID、用户 ID
+	// NewWithDB 传入：LLM 客户端、供应商名、模型名、系统提示词文件路径、记忆存储、会话 ID、用户 ID
 	ag, err := agent.NewWithDB(
-		s.deps.llm, s.deps.cfg.LLM.Model, "prompts/system.md",
+		s.deps.llm, s.deps.cfg.LLM.Provider, s.deps.cfg.LLM.Model, "prompts/system.md",
 		s.deps.mem, session.ID, session.UserID,
 	)
 	if err != nil {

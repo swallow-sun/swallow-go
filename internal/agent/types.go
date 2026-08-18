@@ -18,6 +18,7 @@ const historyLimit = 20
 // Agent 负责拼装上下文、调用模型并持久化对话。
 type Agent struct {
 	provider     llm.Provider
+	providerName string // 供应商名称（deepseek/openai），给 metrics 标签用
 	model        string
 	systemPrompt string
 	mem          *memory.Store

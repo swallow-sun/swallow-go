@@ -25,6 +25,7 @@ import (
 	"github.com/swallow-sun/swallow-go/internal/config"
 	"github.com/swallow-sun/swallow-go/internal/data"
 	"github.com/swallow-sun/swallow-go/internal/debug"
+	"github.com/swallow-sun/swallow-go/internal/metrics"
 	"github.com/swallow-sun/swallow-go/internal/settings"
 	"github.com/swallow-sun/swallow-go/internal/telemetry"
 	"github.com/swallow-sun/swallow-go/internal/trace"
@@ -136,6 +137,11 @@ func run() (runErr error) {
 	// SpanSinkAdapter 把 trace.Span 转成 data.Span 写进 spans 表
 	trace.SetSpanSink(data.SpanSinkAdapter{Repo: repo})
 
+	// metrics.Init 注册所有 Prometheus 指标到默认 Registerer。
+	// 必须在业务代码调 RecordRequest 之前调，否则指标变量是 nil。
+	// 内部用 promauto 创建指标，自动注册，重复调不会 panic。
+	metrics.Init()
+
 	// 这是关闭资源的 defer，执行顺序在前面两个 defer 之前（LIFO，最后注册最先执行）
 	// 程序退出时：先刷新埋点事件（telemetry.Shutdown）再关闭数据库（repo.Close）
 	// 顺序不能反：如果先关数据库，埋点事件就写不进去了
@@ -170,6 +176,15 @@ func run() (runErr error) {
 	pprofShutdown := debug.Start(cfg.Debug.PProfPort)
 	if pprofShutdown != nil {
 		defer pprofShutdown()
+	}
+
+	// 启动 Prometheus metrics 服务（如果 config 里配了 metrics_port > 0）
+	// 返回 shutdown 函数，放到 defer 里在程序退出时优雅关闭
+	// 生产环境 metrics_port=0 不会启动，开发时在 config.local.toml 里设成 9100 即可
+	// curl http://localhost:9100/metrics 能看到所有指标
+	metricsShutdown := metrics.Start(cfg.Metrics.MetricsPort)
+	if metricsShutdown != nil {
+		defer metricsShutdown()
 	}
 
 	// Hertz 框架自带一套日志系统（hlog），这里把它转发到项目唯一的全局 logger

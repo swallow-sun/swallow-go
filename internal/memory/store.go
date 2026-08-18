@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/swallow-sun/swallow-go/internal/data"
+	"github.com/swallow-sun/swallow-go/internal/metrics"
 	"github.com/swallow-sun/swallow-go/internal/provider/llm"
 	"github.com/swallow-sun/swallow-go/internal/telemetry"
 	"github.com/swallow-sun/swallow-go/internal/trace"
@@ -140,6 +141,9 @@ func (s *Store) LoadHistory(
 			"error":                   err.Error(),
 		})
 
+		// Prometheus 指标：记忆查询失败，计数器 +1，耗时直方图记录
+		metrics.RecordMemoryQuery(metrics.StatusFailed, float64(elapsed.Milliseconds()))
+
 		// 把原始错误包一层往上抛
 		return nil, fmt.Errorf("load history: %w", err)
 	}
@@ -173,11 +177,14 @@ func (s *Store) LoadHistory(
 	// 查询成功了，记一个埋点：返回了几条、花了多久
 	telemetry.Emit(ctx, telemetry.EventMemoryQuery, map[string]any{
 		"session_id":              sessionID,
-		"limit":                   limit,
-		"rows_returned":           len(messages),
-		telemetry.FieldStatus:     telemetry.StatusOK,
-		telemetry.FieldDurationMS: elapsed.Milliseconds(),
+			"limit":                   limit,
+			"rows_returned":           len(messages),
+			telemetry.FieldStatus:     telemetry.StatusOK,
+			telemetry.FieldDurationMS: elapsed.Milliseconds(),
 	})
+
+	// Prometheus 指标：记忆查询成功，计数器 +1，耗时直方图记录
+	metrics.RecordMemoryQuery(metrics.StatusOK, float64(elapsed.Milliseconds()))
 
 	// 返回转换好的消息切片
 	return messages, nil

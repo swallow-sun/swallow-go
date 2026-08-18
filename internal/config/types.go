@@ -22,6 +22,8 @@ type Config struct {
 	Auth          AuthConfig     `toml:"auth"`
 	// Debug 对应 [debug] 段，放调试配置（如 pprof 端口）
 	Debug         DebugConfig    `toml:"debug"`
+	// Metrics 对应 [metrics] 段，放 Prometheus 指标服务配置
+	Metrics       MetricsConfig   `toml:"metrics"`
 	// LoadedSources 记录实际加载了哪些配置文件，方便排查"配置从哪来的"
 	// toml:"-" 的意思是：这个字段不参与 TOML 解析，不是从配置文件里读的，
 	// 而是代码在加载文件时自己往里 append 的
@@ -72,6 +74,16 @@ type AuthConfig struct {
 	// OwnerToken 是主人令牌，调接口时用这个来证明"我是主人"
 	// 允许在配置文件里留空，运行时会从数据库加密配置里补充
 	OwnerToken string `toml:"owner_token"` // 主人令牌，用于鉴权（允许为空，由数据库加密配置补充）
+}
+
+// MetricsConfig 放 Prometheus 指标服务配置。
+// MetricsPort=0 表示不启动；非 0 时在该端口启动一个 HTTP 服务，
+// 暴露 /metrics 路径供 Prometheus 抓取。
+// 开发时设 9100，生产按需开启。
+type MetricsConfig struct {
+	// MetricsPort 是 Prometheus metrics HTTP 服务的监听端口，0 表示不启动
+	// 开发时设 9100，curl http://localhost:9100/metrics 能看到所有指标
+	MetricsPort int `toml:"metrics_port"` // Prometheus metrics 端口，0=不启动
 }
 
 // DebugConfig 放调试配置。
