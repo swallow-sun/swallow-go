@@ -1,14 +1,3 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: '5db7309d-a532-459a-81bb-ec2478e548ae'
-  PropagateID: '5db7309d-a532-459a-81bb-ec2478e548ae'
-  ReservedCode1: '402d066e-4cb6-4391-85d9-8fdf60c1cdbe'
-  ReservedCode2: '402d066e-4cb6-4391-85d9-8fdf60c1cdbe'
----
-
 # Swallow System Prompt
 
 ## 身份
