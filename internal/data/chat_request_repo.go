@@ -1,3 +1,13 @@
+// chat_request_repo.go 放聊天幂等请求的 SQLite 数据访问方法。
+//
+// 做的事情：
+//  1. BeginChatRequest：原子创建幂等请求记录，用 ON CONFLICT DO NOTHING 防重复插入。
+//  2. MarkChatRequestRunning：请求开始执行模型后，标记状态为 running 并关联用户消息 ID。
+//  3. CompleteChatRequest：助手回复保存后，标记状态为 completed 并关联助手消息 ID。
+//  4. FailChatRequest：请求执行失败时，标记状态为 failed 并记录稳定错误码。
+//
+// 状态流转：accepted → running → completed/failed。
+// 失败的请求不会自动重试，需要人工修复后重试。
 package data
 
 import (
@@ -9,7 +19,7 @@ import (
 )
 
 // BeginChatRequest 原子创建幂等请求记录。
-// created=false 表示同一会话和 client_message_id 已存在，调用方不得再次调用模型。
+// created=false 表示同一会话和 client_message_id 已存在，不能再调一次模型。
 func (r *sqliteRepo) BeginChatRequest(ctx context.Context, clientMessageID, sessionID string, userID int64, traceID string) (ChatRequest, bool, error) {
 	model := ormChatRequest{
 		ClientMessageID: clientMessageID,

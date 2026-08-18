@@ -1,6 +1,11 @@
-// Package memory 负责对话历史的持久化读写。
+// store.go 放 memory.Store：对话历史的存取。
+//
+// 做的事情：
+//  1. SaveMessage：把一条用户或助手消息写入 dialogues 表，记录 trace ID 和 token 用量，同时打埋点。
+//  2. LoadHistory：从数据库加载最近 N 条对话，转成 LLM 用的 ChatMessage 切片（跳过 system 角色）。
+//
 // Phase 2：对话存 SQLite，每轮对话后写入，启动时从 DB 加载历史。
-// 取代 Phase 1 的 Agent 内存 slice——数据持久化后重启不丢。
+// 取代 Phase 1 的 Agent 内存 slice——数据存进数据库后重启不丢。
 package memory
 
 import (
@@ -29,10 +34,10 @@ func (s *Store) SaveMessage(
 	content string,
 	usage llm.Usage,
 ) error {
-	// 从上下文中取得本轮对话的 trace ID。
+	// 从上下文里拿到本轮对话的 trace ID。
 	traceID := trace.FromContext(ctx)
 
-	// 将 LLM usage 转换为数据层的 TokenUsage。
+	// 把 LLM usage 转成数据层的 TokenUsage。
 	tokenUsage := data.TokenUsage{
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
@@ -82,7 +87,7 @@ func (s *Store) SaveMessage(
 }
 
 // LoadHistory 从数据库加载最近 N 条对话，
-// 并转换为 LLM 使用的 ChatMessage。
+// 转成 LLM 用的 ChatMessage。
 func (s *Store) LoadHistory(
 	ctx context.Context,
 	sessionID string,
@@ -113,8 +118,8 @@ func (s *Store) LoadHistory(
 		return nil, fmt.Errorf("load history: %w", err)
 	}
 
-	// 将数据库模型转换成 LLM 消息。
-	// system prompt 由 Agent 单独添加，这里不重复返回。
+	// 把数据库模型转成 LLM 消息。
+	// system prompt 由 Agent 单独加，这里不重复返回。
 	messages := make(
 		[]llm.ChatMessage,
 		0,

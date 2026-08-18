@@ -1,4 +1,11 @@
-// Package telemetry 定义和记录 Swallow-Go 的轻量业务埋点。
+// types.go 放 telemetry 包的类型定义和常量。
+//
+// 做的事情：
+//  1. 定义事件类型常量：dialogue、memory_query、llm.call、llm.stream、llm.stream.complete。
+//  2. 定义通用字段名和状态值常量：status（ok/error/connected）、ms（耗时毫秒）。
+//  3. 定义 Event 结构体：一条埋点事件，包含类型、数据、trace ID、时间戳等。
+//  4. 定义 EventSink 接口：持久化 Sink，由 data.EventSinkAdapter 实现，免得 telemetry 直接依赖 data 包。
+//  5. 定义 Stats 和 recorder：原子计数器统计事件数，用于运行时观察埋点队列状态。
 package telemetry
 
 import (
@@ -9,10 +16,10 @@ import (
 )
 
 const (
-	// DefaultBufferSize 是调用 Init 时未提供有效容量使用的默认队列长度。
+	// DefaultBufferSize 是调用 Init 时没传有效容量时用的默认队列长度。
 	DefaultBufferSize = 256
 
-	// DefaultSinkWriteTimeout 是单条事件写入持久化 Sink 的最长等待时间。
+	// DefaultSinkWriteTimeout 是单条事件写进持久化 Sink 的最长等待时间。
 	DefaultSinkWriteTimeout = 3 * time.Second
 
 	// 事件类型。
@@ -43,8 +50,8 @@ type Event struct {
 }
 
 // EventSink 是事件持久化目标。
-// 实现必须使用传入的 Context 执行阻塞操作，并在 Context 取消后尽快返回。
-// 返回错误表示本次事件没有可靠写入持久化存储。
+// 实现必须用传进来的 Context 做阻塞操作，Context 取消后赶紧返回。
+// 返回 error 说明这次事件没写成功。
 type EventSink interface {
 	WriteEvent(
 		ctx context.Context,

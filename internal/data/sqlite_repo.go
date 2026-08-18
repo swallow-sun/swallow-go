@@ -1,4 +1,10 @@
-// 本文件使用 GORM 实现 Repository 定义的 SQLite 数据访问方法。
+// sqlite_repo.go 用 GORM 实现 Repository 接口定义的 SQLite 数据访问方法。
+//
+// 做的事情：
+//  1. 实现 Repository 接口的全部方法：用户 CRUD、会话 CRUD、对话 CRUD、事件插入。
+//  2. 显式指定 ORM 模型对应的表名（不靠 GORM 默认的复数命名规则）。
+//  3. 提供 ORM 模型和业务实体之间的转换函数（xxxFromORM / xxxToORM）。
+//  4. 提供 repositoryError 辅助函数：把 GORM 的 ErrRecordNotFound 转成 sql.ErrNoRows。
 package data
 
 import (
@@ -11,15 +17,14 @@ import (
 	"gorm.io/gorm"
 )
 
-func (ormUser) TableName() string { return "users" }
-
-func (ormSession) TableName() string { return "sessions" }
-
-func (ormDialogue) TableName() string { return "dialogues" }
-
-func (ormEvent) TableName() string { return "events" }
-
-func (ormChatRequest) TableName() string { return "chat_requests" }
+// 显式指定 ORM 模型对应的数据库表名，不靠 GORM 默认的复数命名规则。
+func (ormUser) TableName() string { return "users" }           // users 表：注册用户
+func (ormSession) TableName() string { return "sessions" }     // sessions 表：聊天会话
+func (ormDialogue) TableName() string { return "dialogues" }   // dialogues 表：对话消息
+func (ormEvent) TableName() string { return "events" }         // events 表：会话事件
+func (ormChatRequest) TableName() string { return "chat_requests" } // chat_requests 表：聊天请求记录
+func (ormAppSetting) TableName() string { return "app_settings" }   // app_settings 表：运行配置
+func (ormEncryptedSecret) TableName() string { return "encrypted_secrets" } // encrypted_secrets 表：加密密钥
 
 // CreateUser 新增用户，并返回数据库生成的 ID 和时间字段。
 func (r *sqliteRepo) CreateUser(ctx context.Context, name, role string) (User, error) {
@@ -158,6 +163,8 @@ func repositoryError(err error) error {
 	return err
 }
 
+// 以下 fromORM 函数把 GORM ORM 模型转成业务对象（去掉 GORM tag，只留业务字段）。
+
 func userFromORM(model ormUser) User {
 	return User{ID: model.ID, Name: model.Name, Role: model.Role, VoicePrint: stringValue(model.VoicePrint), FacePrint: stringValue(model.FacePrint), CreatedAt: model.CreatedAt, LastActiveAt: model.LastActiveAt}
 }
@@ -186,6 +193,8 @@ func chatRequestFromORM(model ormChatRequest) ChatRequest {
 	}
 }
 
+// stringValue 把可空 *string 转成 string，nil 返回空字符串。
+// 用于 voice_print、face_print 等可空字段。
 func stringValue(value *string) string {
 	if value == nil {
 		return ""

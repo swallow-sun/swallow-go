@@ -1,4 +1,10 @@
-// 本文件实现 OpenAI Chat Completions 兼容协议及 SSE 流解析。
+// openai_compat.go 实现 OpenAI Chat Completions 兼容协议及 SSE 流解析。
+//
+// 做的事情：
+//  1. NewOpenAICompat：创建 Provider 实例，配置 API 地址、密钥、模型名。
+//  2. Complete：非流式调用——发 HTTP POST 请求，解析 JSON 响应，返回完整回复和 token 用量。
+//  3. Stream：流式调用——发 HTTP POST 请求（stream=true），返回 sseStreamReader 逐块读取。
+//  4. sseStreamReader：实现 StreamReader 接口，逐行解析 SSE 数据帧，提取增量文本和最终 token 用量。
 package llm
 
 import (
@@ -46,10 +52,10 @@ func (p *OpenAICompat) Complete(ctx context.Context, req ChatRequest) (ChatRespo
 	}
 	defer resp.Body.Close()
 
-	// 5. 检查状态码，非 2xx 把 body 读出来放进 error
+	// 5. 检查状态码。响应体可能包含敏感信息，不拼入错误和日志。
 	if resp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(resp.Body)
-		return ChatResponse{}, fmt.Errorf("api error: status %d, body: %s", resp.StatusCode, errBody)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, MaxErrorBodyDrainBytes))
+		return ChatResponse{}, fmt.Errorf("api error: status %d", resp.StatusCode)
 	}
 
 	// 6. 解析响应
@@ -72,7 +78,7 @@ func (p *OpenAICompat) Complete(ctx context.Context, req ChatRequest) (ChatRespo
 
 // Stream 实现流式对话。
 // 请求带 stream:true，响应是 SSE 格式（每行 data: {JSON}，末尾 data: [DONE]）。
-// 调用方拿到 StreamReader 后循环调 Next() 逐块读取。
+// 调用的人拿到 StreamReader 后循环调 Next() 逐块读取。
 func (p *OpenAICompat) Stream(ctx context.Context, req ChatRequest) (StreamReader, error) {
 	// 1. 标记流式
 	req.Stream = true
@@ -102,12 +108,12 @@ func (p *OpenAICompat) Stream(ctx context.Context, req ChatRequest) (StreamReade
 
 	// 5. 检查状态码
 	if resp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(resp.Body)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, MaxErrorBodyDrainBytes))
 		resp.Body.Close()
-		return nil, fmt.Errorf("api error: status %d, body: %s", resp.StatusCode, errBody)
+		return nil, fmt.Errorf("api error: status %d", resp.StatusCode)
 	}
 
-	// 6. 返回 StreamReader，调用方负责读完后 Close
+	// 6. 返回 StreamReader，调用的人负责读完后 Close
 	return &sseStreamReader{
 		scanner:  newSSEScanner(resp.Body),
 		body:     resp.Body,

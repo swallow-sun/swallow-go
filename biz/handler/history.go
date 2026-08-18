@@ -1,7 +1,10 @@
-package handler
-
 // history.go 放 GET /api/history 接口的 handler。
-// 客户端调这个接口，传一个 session_id，查这个会话最近 50 条对话记录。
+//
+// 做的事情：
+//  1. 从 URL 查询参数取 session_id。
+//  2. 调 HistoryService.GetHistory 查询这个会话最近 50 条对话记录。
+//  3. 把 service 返回的结果转成 JSON 响应发给客户端。
+package handler
 
 import (
 	"context"
@@ -25,11 +28,8 @@ func (d *Deps) GetHistory(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	// 从数据库查这个会话最近 50 条对话记录。
-	// dialogues 是一个切片，里面每个元素是一条对话记录（包含角色、内容、时间）
-	dialogues, err := d.repo.GetRecentDialogues(ctx, sessionID, 50)
-
-	// 数据库查询出错
+	// 调 HistoryService 查询对话历史
+	result, err := d.history.GetHistory(ctx, sessionID)
 	if err != nil {
 		// 打日志，记录是哪个会话查失败了
 		logger.Error("查询历史失败", zap.String("session_id", sessionID), zap.Error(err))
@@ -38,24 +38,20 @@ func (d *Deps) GetHistory(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	// 把数据库结构体转成给客户端看的 JSON 结构体。
-	// make 预分配切片大小，防止频繁扩容，和 telemetry.go 里 consume 函数的做法一样
-	items := make([]historyItem, 0, len(dialogues))
-
-	// 遍历每条对话记录，转成 historyItem
-	for _, dialogue := range dialogues {
+	// 把 service 返回的 HistoryItem 转成 handler 的 historyItem。
+	// make 先分配好切片容量，免得 append 时频繁扩容
+	items := make([]historyItem, 0, len(result.Items))
+	for _, item := range result.Items {
 		items = append(items, historyItem{
-			Role:    dialogue.Role,    // 角色："user" 或 "assistant"
-			Content: dialogue.Content, // 消息内容
-			// 把时间格式化成可读字符串，Go 的时间格式化很特殊：
-			// 不是用 "YYYY-MM-DD" 而是 "2006-01-02 15:04:05"（Go 的诞生时间做模板）
-			Timestamp: dialogue.Timestamp.Format("2006-01-02 15:04:05"),
+			Role:      item.Role,
+			Content:   item.Content,
+			Timestamp: item.Timestamp,
 		})
 	}
 
 	// 返回 HTTP 200 + JSON 响应体
 	c.JSON(consts.StatusOK, historyResp{
-		SessionID: sessionID, // 哪个会话的历史
-		Items:     items,     // 对话记录列表
+		SessionID: result.SessionID,
+		Items:     items,
 	})
 }

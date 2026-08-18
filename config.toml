@@ -1,5 +1,10 @@
 # Swallow 配置文件
 # 复制此文件为 config.local.toml，填入真实 key，config.local.toml 不会被 git 提交
+# 所有运行配置只从本文件、本地覆盖文件或数据库读取，不读取环境变量。
+
+[app]
+# development 输出 Debug；production 只输出 Info 及以上的 JSON 日志。
+environment = "development"
 
 [server]
 port = 8888
@@ -12,3 +17,7 @@ model    = "deepseek-chat"
 [database]
 path = "data/swallow.db"
 migrations_dir = "script/migrations"
+
+[auth]
+# 可在不提交 Git 的 config.local.toml 中填写，首次启动后会加密写入数据库。
+owner_token = ""

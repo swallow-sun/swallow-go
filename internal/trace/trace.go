@@ -1,4 +1,11 @@
-// Package trace 提供轻量链路追踪 ID。
+// trace.go 放轻量链路追踪 ID 的工具函数。
+//
+// 做的事情：
+//  1. New：生成一个新的 trace ID（UUID 带横杠，36 字符）。
+//  2. Ensure：从 context 中取 trace ID，没有就生成一个新的并塞进 context 返回。
+//  3. WithID：把指定的 trace ID 塞进 context 返回（用于跨函数传递已有 trace ID）。
+//  4. FromContext：从 context 中取 trace ID，没有返回空字符串。
+//
 // 用 context.Context 传递 trace_id，贯穿日志、埋点、DB。
 // Phase 4 升级 OpenTelemetry 时，trace ID 格式兼容（UUID/十六进制）。
 package trace
@@ -9,7 +16,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// New 生成一个新的 trace ID（UUID 去掉横杠，32 字符十六进制）。
+// New 生成一个新的 trace ID（UUID v4，带横杠，36 字符）。
 func New() string {
 	return uuid.NewString()
 }

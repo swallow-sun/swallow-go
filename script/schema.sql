@@ -72,6 +72,25 @@ CREATE TABLE IF NOT EXISTS chat_requests (
     completed_at DATETIME                 -- 请求成功完成时间；未完成时为空
 );
 
+-- app_settings：保存模型名称、服务地址等不敏感运行配置。
+CREATE TABLE IF NOT EXISTS app_settings (
+    setting_key TEXT PRIMARY KEY, -- 稳定配置键，例如 llm.model
+    setting_value TEXT NOT NULL,  -- 普通配置值；禁止保存密钥和令牌
+    value_type TEXT NOT NULL,     -- 值类型；当前支持 string
+    description TEXT,             -- 配置用途的中文说明
+    updated_at DATETIME NOT NULL  -- 配置最后更新时间
+);
+
+-- encrypted_secrets：保存 API Key 和 owner token 的 AES-256-GCM 密文。
+CREATE TABLE IF NOT EXISTS encrypted_secrets (
+    secret_key TEXT PRIMARY KEY, -- 稳定密钥名
+    ciphertext BLOB NOT NULL,    -- 带认证标签的密文
+    nonce BLOB NOT NULL,         -- 每次加密随机生成的 nonce
+    algorithm TEXT NOT NULL,     -- 当前固定 aes-256-gcm
+    key_version INTEGER NOT NULL,-- 主密钥版本
+    updated_at DATETIME NOT NULL -- 密文最后更新时间
+);
+
 -- 获取某个会话最近的消息，并在相同时间戳下使用 ID 保证稳定排序。
 CREATE INDEX IF NOT EXISTS idx_dialogues_session_time
     ON dialogues(session_id, timestamp DESC, id DESC);
@@ -95,3 +114,9 @@ CREATE INDEX IF NOT EXISTS idx_chat_requests_trace
 
 CREATE INDEX IF NOT EXISTS idx_chat_requests_status_updated
     ON chat_requests(status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_app_settings_updated
+    ON app_settings(updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_key_version
+    ON encrypted_secrets(key_version, updated_at DESC);

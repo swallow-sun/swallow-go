@@ -1,38 +1,21 @@
+// types.go 放所有 handler 共用的类型定义。
+//
+// 做的事情：
+//  1. 定义 Deps 结构体：handler 层的依赖集合，持有三个 Service。
+//  2. 定义 HTTP 请求/响应结构体：createSessionReq、chatReq、historyResp 等，
+//     客户端发来的 JSON 反序列化到请求结构体，响应结构体序列化成 JSON 发给客户端。
 package handler
 
 import (
-	"github.com/swallow-sun/swallow-go/internal/config"
-	"github.com/swallow-sun/swallow-go/internal/data"
-	"github.com/swallow-sun/swallow-go/internal/identity"
-	"github.com/swallow-sun/swallow-go/internal/memory"
-	"github.com/swallow-sun/swallow-go/internal/provider/llm"
+	"github.com/swallow-sun/swallow-go/biz/service"
 )
 
-const (
-	chatErrorAgentInit       = "agent_init_failed"
-	chatErrorConnect         = "llm_connect_failed"
-	chatErrorStreamRead      = "llm_stream_read_failed"
-	chatErrorClientClosed    = "client_stream_closed"
-	chatErrorUserMissing     = "user_dialogue_missing"
-	chatErrorAssistantSave   = "assistant_save_failed"
-	chatErrorRequestState    = "request_state_failed"
-	chatErrorRequestFailed   = "chat_request_failed"
-	chatErrorResultMissing   = "chat_result_missing"
-	chatErrorRequestRunning  = "chat_request_in_progress"
-	maxClientMessageIDLength = 128
-)
-
-// types.go 放所有 handler 共用的请求/响应结构体。
-// 客户端发来的 JSON 会被反序列化到 "请求结构体" 里，
-// handler 返回的 "响应结构体" 会被序列化成 JSON 发给客户端。
-
-// Deps 是 HTTP Handler 共用的业务依赖集合。
+// Deps 是 handler 层的依赖集合，持有三个 Service。
+// handler 通过 Service 间接访问数据层，跟 HTTP 解析和业务逻辑分开。
 type Deps struct {
-	cfg  *config.Config
-	repo data.Repository
-	idm  *identity.Manager
-	mem  *memory.Store
-	llm  llm.Provider
+	chat    *service.ChatService
+	session *service.SessionService
+	history *service.HistoryService
 }
 
 // createSessionReq 是 POST /api/session 的请求体。
@@ -52,9 +35,9 @@ type createSessionResp struct {
 // chatReq 是 POST /api/chat 的请求体。
 // 客户端传 {"session_id": "xxx", "message": "你好"}，解析到这个结构体里。
 type chatReq struct {
-	SessionID       string `json:"session_id"`        // 会话 ID，告诉服务端这段消息属于哪段对话
-	ClientMessageID string `json:"client_message_id"` // 客户端生成的稳定消息 ID，网络重试时必须保持不变
-	Message         string `json:"message"`           // 用户说的话
+	SessionID        string `json:"session_id"`         // 会话 ID，告诉服务端这段消息属于哪段对话
+	ClientMessageID string `json:"client_message_id"`  // 客户端生成的稳定消息 ID，网络重试时必须保持不变
+	Message         string `json:"message"`            // 用户说的话
 }
 
 // historyItem 是一条对话记录，对应数据库 dialogues 表里的一行。

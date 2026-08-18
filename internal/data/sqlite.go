@@ -1,4 +1,11 @@
-// 本文件负责通过 GORM 初始化 SQLite 连接并执行版本化迁移。
+// sqlite.go 放 SQLite 数据库的初始化逻辑。
+//
+// 做的事情：
+//  1. 创建数据库文件目录（不存在则自动建）。
+//  2. 用 GORM 打开 SQLite 连接（WAL 模式 + busy_timeout），关闭 GORM 自带日志。
+//  3. Ping 数据库验证连接可用。
+//  4. 执行版本化迁移（migrateSQLite）。
+//  5. 返回 sqliteRepo 实例给上层使用。
 package data
 
 import (

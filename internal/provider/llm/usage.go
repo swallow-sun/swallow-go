@@ -1,3 +1,8 @@
+// usage.go 放 Usage 类型的辅助方法，处理不同 LLM 供应商返回的 Token 用量格式差异。
+//
+// 做的事情：
+//  1. CacheHitTokens：返回缓存命中的输入 Token 数，兼容两种常见响应格式（PromptCacheHitTokens 或 PromptTokensDetails.CachedTokens）。
+//  2. CacheMissTokens：返回缓存未命中的输入 Token 数，上游未直接返回时根据输入总量减去命中量计算。
 package llm
 
 // CacheHitTokens 返回缓存命中的输入 Token 数，并兼容两种常见响应格式。

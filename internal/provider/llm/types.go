@@ -1,4 +1,12 @@
-// Package llm 定义 LLM 服务的数据结构和 Provider 接口。
+// types.go 放 LLM 服务的核心数据结构和接口定义。
+//
+// 做的事情：
+//  1. 定义 Provider 接口：跟具体模型供应商无关的调用接口（Complete 非流式 + Stream 流式）。
+//  2. 定义 StreamReader 接口：流式响应读取接口（Next 逐块读 + Usage 取用量 + Close 关闭）。
+//  3. 定义消息和请求/响应结构体：ChatMessage、ChatRequest、ChatResponse、Usage、StreamResponse 等。
+//  4. 定义角色常量：system、user、assistant、tool、function。
+//  5. 定义 OpenAICompat 和 sseStreamReader 的结构体骨架（实现分别在 openai_compat.go）。
+//
 // 所有实现遵循 OpenAI Chat Completions 兼容协议，
 // 换模型只需改 base_url + api_key + model 三个配置。
 package llm
@@ -17,7 +25,7 @@ type Config struct {
 	Model   string
 }
 
-// Provider 是与具体模型供应商无关的调用接口。
+// Provider 是跟具体模型供应商无关的调用接口。
 type Provider interface {
 	Complete(ctx context.Context, req ChatRequest) (ChatResponse, error)
 	Stream(ctx context.Context, req ChatRequest) (StreamReader, error)
@@ -48,6 +56,8 @@ type sseStreamReader struct {
 type Role string
 
 const (
+	MaxErrorBodyDrainBytes int64 = 4096
+
 	RoleSystem    Role = "system"    // 系统指令，设定助手人格和行为规则
 	RoleUser      Role = "user"      // 用户输入
 	RoleAssistant Role = "assistant" // 助手回复
@@ -75,7 +85,7 @@ type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage"` // 在 [DONE] 前返回整次请求的 token 用量
 }
 
-// Usage 记录 token 消耗，供埋点和成本统计用。
+// Usage 记录 token 消耗，给埋点和成本统计用。
 type Usage struct {
 	PromptTokens            int                     `json:"prompt_tokens"`
 	CompletionTokens        int                     `json:"completion_tokens"`
@@ -104,7 +114,7 @@ type ChatResponse struct {
 }
 
 // APIResponse 是 OpenAI 兼容 API 的原始响应结构。
-// 供 openai_compat.go 解析用，调用方不直接接触。
+// 供 openai_compat.go 解析用，外面的人不直接碰。
 type APIResponse struct {
 	Choices []APIChoice `json:"choices"`
 	Usage   Usage       `json:"usage"`

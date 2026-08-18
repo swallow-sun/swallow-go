@@ -1,7 +1,15 @@
-// cmd/chat/main.go 是 Phase 2 的 CLI 对话调试入口。
+// main.go 是 Phase 2 的 CLI 对话调试入口（不是正式服务入口，正式入口是 cmd/server）。
+//
+// 做的事情：
+//  1. 加载 TOML 配置 + 初始化日志。
+//  2. 初始化 SQLite 数据库 + 执行版本化迁移。
+//  3. 加载数据库运行配置（解密敏感配置覆盖到 cfg）。
+//  4. 启动埋点系统（telemetry）。
+//  5. 用户登录 + 创建会话（identity.Manager）。
+//  6. 创建 LLM Provider、Memory Store、Agent。
+//  7. 循环读取用户输入 → 流式对话 → 逐块打印 → 持久化助手回复。
+//
 // 流式对话 + SQLite 持久化（重启不丢历史）。
-// 不是正式服务入口，正式入口是 cmd/server。
-
 package main
 
 import (
@@ -22,6 +30,7 @@ import (
 	"github.com/swallow-sun/swallow-go/internal/identity"
 	"github.com/swallow-sun/swallow-go/internal/memory"
 	"github.com/swallow-sun/swallow-go/internal/provider/llm"
+	"github.com/swallow-sun/swallow-go/internal/settings"
 	"github.com/swallow-sun/swallow-go/internal/telemetry"
 	"github.com/swallow-sun/swallow-go/internal/trace"
 )
@@ -36,28 +45,52 @@ func main() {
 // run 执行 CLI 初始化与对话循环。
 // 初始化失败返回非 nil error（由 main 置非零退出码）；
 // 用户主动退出（quit / EOF）返回 nil。
-func run() error {
+func run() (runErr error) {
 	userName := flag.String("user", "owner", "用户名（默认 owner）")
 	flag.Parse()
 
-	// 1. 初始化日志 + 埋点
-	if err := logger.Init(); err != nil {
-		return fmt.Errorf("初始化日志失败: %w", err)
-	}
-	defer func() { _ = logger.Sync() }()
-	// 2. 加载配置
+	// 1. 只从 TOML 文件加载配置，不读取环境变量。
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("加载配置失败: %w", err)
 	}
-	if cfg.LLM.APIKey == "" {
-		return fmt.Errorf("LLM API Key 未配置")
+	// 2. 根据 TOML 中的运行环境初始化日志。
+	if err := logger.Init(cfg.App.Environment); err != nil {
+		return fmt.Errorf("初始化日志失败: %w", err)
 	}
-
+	defer func() { _ = logger.Sync() }()
+	startupID := trace.New()
+	logger.AddFields(zap.String("startup_id", startupID))
+	logger.Info("程序开始启动")
+	for _, source := range cfg.LoadedSources {
+		logger.Debug("已加载配置文件", zap.String("path", source))
+	}
+	defer func() {
+		if runErr != nil {
+			logger.Error("程序启动失败", zap.Error(runErr))
+		}
+	}()
 	// 3. 初始化数据库
 	repo, err := data.NewSQLite(cfg.Database.Path, cfg.Database.MigrationsDir)
 	if err != nil {
 		return fmt.Errorf("初始化数据库失败: %w", err)
+	}
+	settingsService, err := settings.New(repo, cfg.Database.Path)
+	if err != nil {
+		_ = repo.Close()
+		return fmt.Errorf("初始化加密配置服务失败: %w", err)
+	}
+	if err := settingsService.LoadInto(context.Background(), cfg); err != nil {
+		_ = repo.Close()
+		return fmt.Errorf("加载数据库运行配置失败: %w", err)
+	}
+	if err := cfg.ValidateRuntime(); err != nil {
+		_ = repo.Close()
+		return fmt.Errorf("校验数据库运行配置失败: %w", err)
+	}
+	if cfg.LLM.APIKey == "" {
+		_ = repo.Close()
+		return fmt.Errorf("LLM API Key 未配置")
 	}
 	// 数据库准备完成后再启动埋点，保证退出时能够先刷新事件再关闭数据库。
 	telemetry.Init(256)

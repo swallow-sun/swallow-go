@@ -1,3 +1,9 @@
+// register.go 放 HTTP 路由注册逻辑。
+//
+// 做的事情：
+//  1. 注册健康检查路由：GET /ping。
+//  2. 注册对话 API 路由：POST /api/session、GET /api/history、POST /api/chat。
+//  3. 路由对应的 handler 方法绑定在 deps 上，共享同一份依赖。
 package router
 
 import (
@@ -7,7 +13,7 @@ import (
 )
 
 // Register 注册所有业务路由。
-// deps 包含 llm/memory/identity 等共享依赖，启动时创建一次。
+// deps 里面有 llm/memory/identity 等共享依赖，启动时创建一次。
 func Register(r *server.Hertz, deps *handler.Deps) {
 	GeneratedRegister(r)
 

@@ -1,6 +1,13 @@
-// Package telemetry 做轻量埋点。
-// 事件写 channel，后台 goroutine 消费：打日志 + 写 SQLite events 表（可选）。
-// 不直接依赖 data 包（避免循环依赖），通过 EventSink 接口注入。
+// telemetry.go 放轻量埋点系统：事件写 channel，后台 goroutine 消费。
+//
+// 做的事情：
+//  1. Init：初始化事件 channel 和后台消费 goroutine，设置容量和 Sink。
+//  2. Emit：把事件写入 channel（非阻塞，满了丢弃并打 Warn），给业务代码调。
+//  3. consume：后台 goroutine 从 channel 读事件，打日志 + 写 Sink（可选 SQLite events 表）。
+//  4. Shutdown：关闭 channel，等待消费 goroutine 排空剩余事件后退出。
+//  5. Stats：返回当前队列中的事件数等运行时统计。
+//
+// 不直接依赖 data 包（免得循环依赖），通过 EventSink 接口传进来。
 // 每个事件携带 trace_id，串联同一次对话的完整调用链。
 package telemetry
 
@@ -73,7 +80,7 @@ func Emit(ctx context.Context, name string, fields map[string]any) {
 }
 
 func (r *recorder) emit(ctx context.Context, name string, fields map[string]any) {
-	// 读锁覆盖“检查状态 + 发送”。Shutdown 必须取得写锁后才能 close，
+	// 读锁覆盖“检查状态 + 发送”。Shutdown 必须拿到写锁后才能 close，
 	// 因此不会发生检查通过后向已关闭 channel 发送的 panic。
 	r.stateMu.RLock()
 	defer r.stateMu.RUnlock()
@@ -170,7 +177,7 @@ func (r *recorder) processEvent(ev Event) {
 	}
 }
 
-// Snapshot 返回统计值副本，供健康检查、看板和测试使用。
+// Snapshot 返回统计值副本，给健康检查、看板和测试用。
 func Snapshot() Stats {
 	return globalRecorder.snapshot()
 }

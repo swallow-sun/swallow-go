@@ -40,7 +40,7 @@ _testmain.go
 /docs/
 *_test.go
 /script/migrations/README.md
-/swallow-go-代码审查与实施清单.md
+/docs/swallow-go-代码审查与实施清单.md
 *.local.yml
 dumped_hertz_remote_config.json
 
@@ -56,6 +56,7 @@ config.local.yaml
 *.db-shm
 *.sqlite
 *.sqlite3
+*.db.key
 /data/
 
 # 构建产物
