@@ -21,6 +21,14 @@ const (
 	LogLevelWarn = "warn"
 	// LogLevelError 只输出 Error 及以上日志。
 	LogLevelError = "error"
+	// DefaultLogMaxSizeMB 是单个日志文件默认轮转大小。
+	DefaultLogMaxSizeMB = 100
+	// DefaultLogMaxBackups 是默认保留的旧日志文件数量。
+	DefaultLogMaxBackups = 30
+	// DefaultLogMaxAgeDays 是旧日志默认保留天数。
+	DefaultLogMaxAgeDays = 30
+	// DefaultLogCompress 表示默认压缩轮转后的旧日志。
+	DefaultLogCompress = true
 )
 
 // Config 是整个项目的配置根结构.
@@ -51,8 +59,12 @@ type Config struct {
 
 // LogConfig 控制控制台和本地文件共用的日志等级与存储目录。
 type LogConfig struct {
-	Level     string `toml:"level"`     // debug、info、warn 或 error
-	Directory string `toml:"directory"` // 本地日志目录，相对于程序工作目录或绝对路径
+	Level      string `toml:"level"`        // debug、info、warn 或 error
+	Directory  string `toml:"directory"`    // 本地日志目录，相对于程序工作目录或绝对路径
+	MaxSizeMB  int    `toml:"max_size_mb"`  // 单个文件达到该 MB 数后轮转
+	MaxBackups int    `toml:"max_backups"`  // 最多保留的旧日志数量
+	MaxAgeDays int    `toml:"max_age_days"` // 旧日志最多保留天数
+	Compress   *bool  `toml:"compress"`     // 是否 gzip 压缩旧日志；指针用于区分未配置和 false
 }
 
 // AppConfig 放应用级配置(运行环境等).

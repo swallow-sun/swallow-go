@@ -68,12 +68,23 @@ func (cfg *Config) applyLogDefaults() {
 	}
 	if strings.TrimSpace(cfg.Log.Level) != "" {
 		cfg.Log.Level = strings.ToLower(strings.TrimSpace(cfg.Log.Level))
-		return
-	}
-	if cfg.App.Environment == "production" {
+	} else if cfg.App.Environment == "production" {
 		cfg.Log.Level = DefaultProductionLogLevel
 	} else {
 		cfg.Log.Level = DefaultDevelopmentLogLevel
+	}
+	if cfg.Log.MaxSizeMB == 0 {
+		cfg.Log.MaxSizeMB = DefaultLogMaxSizeMB
+	}
+	if cfg.Log.MaxBackups == 0 {
+		cfg.Log.MaxBackups = DefaultLogMaxBackups
+	}
+	if cfg.Log.MaxAgeDays == 0 {
+		cfg.Log.MaxAgeDays = DefaultLogMaxAgeDays
+	}
+	if cfg.Log.Compress == nil {
+		compress := DefaultLogCompress
+		cfg.Log.Compress = &compress
 	}
 }
 
@@ -110,6 +121,15 @@ func (cfg Config) ValidateBootstrap() error {
 	default:
 		return fmt.Errorf("log.level must be debug, info, warn or error")
 	}
+	if cfg.Log.MaxSizeMB < 0 {
+		return fmt.Errorf("log.max_size_mb must not be negative")
+	}
+	if cfg.Log.MaxBackups < 0 {
+		return fmt.Errorf("log.max_backups must not be negative")
+	}
+	if cfg.Log.MaxAgeDays < 0 {
+		return fmt.Errorf("log.max_age_days must not be negative")
+	}
 	// 端口号必须在 1-65535 范围内,0 和负数,超过 65535 都不行
 	if cfg.Server.Port < 1 || cfg.Server.Port > 65535 {
 		return fmt.Errorf("server.port must be between 1 and 65535")
@@ -122,6 +142,11 @@ func (cfg Config) ValidateBootstrap() error {
 	// 迁移目录不能为空,空了迁移器就找不到 SQL 文件
 	if strings.TrimSpace(cfg.Database.MigrationsDir) == "" {
 		return fmt.Errorf("database.migrations_dir must not be empty")
+	}
+	// owner token 不能为空, 空了所有需要认证的接口(chat/history/dashboard)都会返回 503.
+	// 必须在启动阶段就报错, 不要让服务带着没配 token 的状态启动.
+	if strings.TrimSpace(cfg.Auth.OwnerToken) == "" {
+		return fmt.Errorf("auth.owner_token must not be empty")
 	}
 	return nil
 }

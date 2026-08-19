@@ -72,7 +72,15 @@ func run() (runErr error) {
 		return fmt.Errorf("load config failed: %w", err)
 	}
 	// 2. 根据 TOML 中的运行环境、日志等级和目录初始化日志.
-	if err := logger.Init(logger.Options{Environment: cfg.App.Environment, Level: cfg.Log.Level, Directory: cfg.Log.Directory}); err != nil {
+	if err := logger.Init(logger.Options{
+		Environment: cfg.App.Environment,
+		Level:       cfg.Log.Level,
+		Directory:   cfg.Log.Directory,
+		MaxSizeMB:   cfg.Log.MaxSizeMB,
+		MaxBackups:  cfg.Log.MaxBackups,
+		MaxAgeDays:  cfg.Log.MaxAgeDays,
+		Compress:    *cfg.Log.Compress,
+	}); err != nil {
 		return fmt.Errorf("init logger failed: %w", err)
 	}
 	// 清空所有的日志缓存,有些日志没输出,输出出来
@@ -90,6 +98,10 @@ func run() (runErr error) {
 		zap.String("environment", cfg.App.Environment),
 		zap.String("log_level", cfg.Log.Level),
 		zap.String("log_directory", cfg.Log.Directory),
+		zap.Int("log_max_size_mb", cfg.Log.MaxSizeMB),
+		zap.Int("log_max_backups", cfg.Log.MaxBackups),
+		zap.Int("log_max_age_days", cfg.Log.MaxAgeDays),
+		zap.Bool("log_compress", *cfg.Log.Compress),
 	)
 	// 遍历所有已经加载的配置文件路径,打 Debug 日志记录下来
 	// 举个例子,如果配了 config.toml + config.local.toml,这里会打两条日志

@@ -16,10 +16,14 @@ const (
 	MaxDebugSQLLength = 4096
 	// LogDirectory 是本地日志文件的固定目录，相对于程序工作目录。
 	LogDirectory = "logs"
-	// LogFileDateLayout 用日期拆分日志文件，避免所有历史日志写入同一个文件。
-	LogFileDateLayout = "2006-01-02"
-	// LogFilePrefix 是日志文件名前缀，最终文件名如 swallow-2026-08-19.log。
-	LogFilePrefix = "swallow-"
+	// LogFileName 是当前正在写入的主日志文件名；旧文件由轮转器重命名。
+	LogFileName = "swallow.log"
+	// DefaultMaxSizeMB 是未传配置时的单文件默认大小。
+	DefaultMaxSizeMB = 100
+	// DefaultMaxBackups 是未传配置时默认保留的备份数。
+	DefaultMaxBackups = 30
+	// DefaultMaxAgeDays 是未传配置时旧日志默认保留天数。
+	DefaultMaxAgeDays = 30
 )
 
 // HertzAdapter 把 Hertz 框架日志转发到项目唯一的全局 logger.
@@ -38,4 +42,8 @@ type Options struct {
 	Environment string // development 或 production，控制敏感 SQL 是否允许输出
 	Level       string // debug、info、warn 或 error
 	Directory   string // 本地日志文件目录
+	MaxSizeMB   int    // 单个日志文件轮转大小，单位 MB
+	MaxBackups  int    // 最多保留的旧日志数量
+	MaxAgeDays  int    // 旧日志保留天数
+	Compress    bool   // 是否 gzip 压缩轮转后的旧日志
 }

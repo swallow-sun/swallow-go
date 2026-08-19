@@ -13,18 +13,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // global 是全局 logger 实例,Init 之后可用.
 // 全局变量,所有包通过 Info/Warn/Error/Debug 这些函数间接访问它.
 var global *zap.Logger
 
-// logFile 是当前进程持有的本地日志文件，Sync 时刷新并关闭。
-var logFile *os.File
+// logWriter 是当前进程持有的轮转日志写入器，Sync 时关闭。
+var logWriter *lumberjack.Logger
 
 // environment 保存从 TOML 读取的当前运行环境,用于控制日志格式和最低级别.
 // 默认是开发模式 "development".
@@ -33,7 +33,15 @@ var environment = EnvironmentDevelopment
 // Init 初始化全局 logger；不传参数时使用开发环境、Debug 和 logs 目录。
 // 开发和生产环境都以 JSON 同时输出到控制台和配置目录下的日期日志文件。
 func Init(options ...Options) error {
-	opt := Options{Environment: EnvironmentDevelopment, Level: "debug", Directory: LogDirectory}
+	opt := Options{
+		Environment: EnvironmentDevelopment,
+		Level:       "debug",
+		Directory:   LogDirectory,
+		MaxSizeMB:   DefaultMaxSizeMB,
+		MaxBackups:  DefaultMaxBackups,
+		MaxAgeDays:  DefaultMaxAgeDays,
+		Compress:    true,
+	}
 	if len(options) > 0 {
 		if options[0].Environment != "" {
 			opt.Environment = options[0].Environment
@@ -44,6 +52,16 @@ func Init(options ...Options) error {
 		if options[0].Directory != "" {
 			opt.Directory = options[0].Directory
 		}
+		if options[0].MaxSizeMB > 0 {
+			opt.MaxSizeMB = options[0].MaxSizeMB
+		}
+		if options[0].MaxBackups > 0 {
+			opt.MaxBackups = options[0].MaxBackups
+		}
+		if options[0].MaxAgeDays > 0 {
+			opt.MaxAgeDays = options[0].MaxAgeDays
+		}
+		opt.Compress = options[0].Compress
 	}
 	environment = opt.Environment
 	var level zapcore.Level
@@ -52,22 +70,32 @@ func Init(options ...Options) error {
 	}
 
 	// 重复初始化时先刷新并关闭旧文件，避免测试或多入口初始化造成文件句柄泄漏。
-	if logFile != nil {
-		_ = logFile.Sync()
-		_ = logFile.Close()
-		logFile = nil
+	if logWriter != nil {
+		_ = logWriter.Close()
+		logWriter = nil
 	}
 
 	// logs 目录不存在时自动创建；创建失败直接终止启动，避免误以为日志已经持久化。
 	if err := os.MkdirAll(opt.Directory, 0o755); err != nil {
 		return fmt.Errorf("create log directory %s: %w", opt.Directory, err)
 	}
-	logPath := filepath.Join(opt.Directory, LogFilePrefix+time.Now().Format(LogFileDateLayout)+".log")
-	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	logPath := filepath.Join(opt.Directory, LogFileName)
+	// Lumberjack 延迟到首次写入才打开文件；这里提前探测，确保路径或权限错误在启动阶段暴露。
+	probe, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("open log file %s: %w", logPath, err)
 	}
-	logFile = file
+	if err := probe.Close(); err != nil {
+		return fmt.Errorf("close log file probe %s: %w", logPath, err)
+	}
+	logWriter = &lumberjack.Logger{
+		Filename:   logPath,
+		MaxSize:    opt.MaxSizeMB,
+		MaxBackups: opt.MaxBackups,
+		MaxAge:     opt.MaxAgeDays,
+		Compress:   opt.Compress,
+		LocalTime:  true,
+	}
 
 	// 编码器配置:用 JSON 格式,方便机器解析,开发和生产统一
 	encoderConfig := zap.NewProductionEncoderConfig()
@@ -77,7 +105,7 @@ func Init(options ...Options) error {
 
 	// 控制台和本地文件使用相同 JSON、级别和结构化字段，方便直接检索 startup_id/trace_id。
 	consoleCore := zapcore.NewCore(encoder, zapcore.Lock(os.Stdout), level)
-	fileCore := zapcore.NewCore(encoder.Clone(), zapcore.AddSync(logFile), level)
+	fileCore := zapcore.NewCore(encoder.Clone(), zapcore.AddSync(logWriter), level)
 	core := zapcore.NewTee(consoleCore, fileCore)
 
 	// zap.AddCallerSkip(1) 让 caller 往上跳一层,跳过 logger.Info/Warn/Error 封装函数,
@@ -119,11 +147,11 @@ func Sync() error {
 	}
 	// 先刷新 zap 的控制台和文件 Core，再关闭文件句柄。
 	syncErr := global.Sync()
-	if logFile == nil {
+	if logWriter == nil {
 		return syncErr
 	}
-	closeErr := logFile.Close()
-	logFile = nil
+	closeErr := logWriter.Close()
+	logWriter = nil
 	if syncErr != nil {
 		return syncErr
 	}
