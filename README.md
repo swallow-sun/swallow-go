@@ -1,19 +1,4 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: '2ff07abf-9ae4-49af-b774-a61dc70434c2'
-  PropagateID: '2ff07abf-9ae4-49af-b774-a61dc70434c2'
-  ReservedCode1: 'fb268c63-08f2-4426-a0c8-4da77a223d53'
-  ReservedCode2: 'fb268c63-08f2-4426-a0c8-4da77a223d53'
----
-
 # Swallow-Go
-
-手搓贾维斯式私人 AI 助手的 Go 服务端，学习项目，分阶段实现。
-
-最终形态：Go 服务端上服务器，C++ 客户端上开发板。当前在阶段 2（事件、Token 与调用链）。
 
 ## 技术栈
 
