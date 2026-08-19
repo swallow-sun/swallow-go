@@ -24,40 +24,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// 标签的合法取值,防止手拼写错产生高基数.
-const (
-	// ComponentGo 是 Go 服务端组件标签
-	ComponentGo = "go"
-	// ComponentDevice 是移动设备组件标签(预留,当前阶段不产生)
-	ComponentDevice = "device"
-	// ComponentDesktop 是 Rust 电脑代理组件标签(预留)
-	ComponentDesktop = "desktop"
-	// ComponentMCU 是 MCU 组件标签(预留)
-	ComponentMCU = "mcu"
-
-	// StatusOK 操作成功
-	StatusOK = "ok"
-	// StatusFailed 操作失败
-	StatusFailed = "failed"
-	// StatusDenied 权限拒绝(预留,沙箱阶段产生)
-	StatusDenied = "denied"
-	// StatusTimeout 超时
-	StatusTimeout = "timeout"
-	// StatusCancelled 客户端取消
-	StatusCancelled = "cancelled"
-
-	// TokenTypeInput 输入 Token
-	TokenTypeInput = "input"
-	// TokenTypeOutput 输出 Token
-	TokenTypeOutput = "output"
-	// TokenTypeCachedInput 缓存命中输入 Token
-	TokenTypeCachedInput = "cached_input"
-	// TokenTypeCacheCreation 缓存创建 Token(Anthropic 概念,预留)
-	TokenTypeCacheCreation = "cache_creation"
-	// TokenTypeReasoning 推理 Token(思维链)
-	TokenTypeReasoning = "reasoning"
-)
-
 // 下面是进程级唯一的指标变量.
 // 用 promauto 包创建,自动注册到 prometheus.DefaultRegisterer,
 // 不需要手动调 Register——Init 里统一做一次注册确认.

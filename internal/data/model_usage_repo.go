@@ -38,15 +38,18 @@ func (r *sqliteRepo) InsertModelUsage(ctx context.Context, usage ModelUsage) err
 	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
 		logger.Error("model_usages insert failed",
 			zap.String("trace_id", model.TraceID),
-			zap.Any("row", model),
+			zap.String("provider", model.Provider),
+			zap.String("model", model.Model),
 			zap.Error(err),
 		)
 		return fmt.Errorf("insert model usage: %w", err)
 	}
 
-	// 写库成功后打 Debug 日志,用 zap.Any 打写入后的完整 model
+	// 只记录统计标识，不输出完整 ORM 对象。
 	logger.Debug("model_usages insert succeeded",
-		zap.Any("row", model),
+		zap.Int64("usage_id", model.ID),
+		zap.String("trace_id", model.TraceID),
+		zap.String("model", model.Model),
 	)
 
 	return nil

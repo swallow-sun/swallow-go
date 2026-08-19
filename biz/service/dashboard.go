@@ -16,36 +16,18 @@ import (
 	"time"
 )
 
-// DashboardService 负责看板查询(只读聚合).
-type DashboardService struct {
-	deps *Deps
-}
-
 // NewDashboardService 创建一个 DashboardService.
 func NewDashboardService(deps *Deps) *DashboardService {
 	return &DashboardService{deps: deps}
 }
 
-// DashboardModelUsageItem 是一条日聚合记录, 对应 model_usage_daily 表里的一行.
-type DashboardModelUsageItem struct {
-	Date              string `json:"date"`                // 聚合日期, 格式 YYYY-MM-DD
-	UserID            int64  `json:"user_id"`             // 用户 ID
-	Provider          string `json:"provider"`            // 供应商名称
-	Model             string `json:"model"`               // 模型名
-	Operation         string `json:"operation"`           // 操作类型: chat/embedding/vision/asr/tts
-	RequestCount      int64  `json:"request_count"`       // 请求总数
-	FailedCount       int64  `json:"failed_count"`        // 失败请求数
-	InputTokens       int64  `json:"input_tokens"`        // 输入 Token 总量
-	OutputTokens      int64  `json:"output_tokens"`       // 输出 Token 总量
-	CachedInputTokens int64  `json:"cached_input_tokens"` // 缓存命中输入 Token 总量
+// OwnerToken 返回启动时已经从加密数据库配置加载的主人令牌。
+func (s *DashboardService) OwnerToken() string {
+	return s.deps.cfg.Auth.OwnerToken
 }
 
-// DashboardModelUsageResult 是 GetModelUsage 的返回值.
-type DashboardModelUsageResult struct {
-	From  string                   `json:"from"`  // 查询起始日期
-	To    string                   `json:"to"`    // 查询结束日期
-	Items []DashboardModelUsageItem `json:"items"` // 日聚合记录列表
-}
+// Error 返回可安全展示给客户端的参数错误说明。
+func (e *DashboardValidationError) Error() string { return e.Message }
 
 // GetModelUsage 按日期范围查模型用量日聚合数据.
 // dateFrom 和 dateTo 格式为 YYYY-MM-DD, 返回按日期倒序排列的记录.
@@ -53,16 +35,24 @@ type DashboardModelUsageResult struct {
 func (s *DashboardService) GetModelUsage(ctx context.Context, dateFrom, dateTo string) (DashboardModelUsageResult, error) {
 	// 参数校验: 日期不能为空
 	if dateFrom == "" || dateTo == "" {
-		return DashboardModelUsageResult{}, fmt.Errorf("from and to are required")
+		return DashboardModelUsageResult{}, &DashboardValidationError{Message: "from and to are required"}
 	}
 
 	// 校验日期格式: 必须是 YYYY-MM-DD
 	// time.Parse 解析日期字符串, 解析失败说明格式不对
-	if _, err := time.Parse("2006-01-02", dateFrom); err != nil {
-		return DashboardModelUsageResult{}, fmt.Errorf("invalid from date format, want YYYY-MM-DD: %w", err)
+	from, err := time.Parse("2006-01-02", dateFrom)
+	if err != nil {
+		return DashboardModelUsageResult{}, &DashboardValidationError{Message: "invalid from date format, want YYYY-MM-DD"}
 	}
-	if _, err := time.Parse("2006-01-02", dateTo); err != nil {
-		return DashboardModelUsageResult{}, fmt.Errorf("invalid to date format, want YYYY-MM-DD: %w", err)
+	to, err := time.Parse("2006-01-02", dateTo)
+	if err != nil {
+		return DashboardModelUsageResult{}, &DashboardValidationError{Message: "invalid to date format, want YYYY-MM-DD"}
+	}
+	if from.After(to) {
+		return DashboardModelUsageResult{}, &DashboardValidationError{Message: "from must not be after to"}
+	}
+	if int(to.Sub(from).Hours()/24)+1 > MaxDashboardRangeDays {
+		return DashboardModelUsageResult{}, &DashboardValidationError{Message: "date range exceeds maximum allowed days"}
 	}
 
 	// 调 repo 查日聚合数据
@@ -75,16 +65,18 @@ func (s *DashboardService) GetModelUsage(ctx context.Context, dateFrom, dateTo s
 	items := make([]DashboardModelUsageItem, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, DashboardModelUsageItem{
-			Date:              row.Date,
-			UserID:            row.UserID,
-			Provider:          row.Provider,
-			Model:             row.Model,
-			Operation:         row.Operation,
-			RequestCount:      row.RequestCount,
-			FailedCount:       row.FailedCount,
-			InputTokens:       row.InputTokens,
-			OutputTokens:      row.OutputTokens,
-			CachedInputTokens: row.CachedInputTokens,
+			Date:                row.Date,
+			UserID:              row.UserID,
+			Provider:            row.Provider,
+			Model:               row.Model,
+			Operation:           row.Operation,
+			RequestCount:        row.RequestCount,
+			FailedCount:         row.FailedCount,
+			InputTokens:         row.InputTokens,
+			OutputTokens:        row.OutputTokens,
+			CachedInputTokens:   row.CachedInputTokens,
+			EstimatedCostMicros: row.EstimatedCostMicros,
+			Currency:            row.Currency,
 		})
 	}
 

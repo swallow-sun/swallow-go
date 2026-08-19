@@ -120,3 +120,159 @@ CREATE INDEX IF NOT EXISTS idx_app_settings_updated
 
 CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_key_version
     ON encrypted_secrets(key_version, updated_at DESC);
+
+-- model_usages：逐次记录模型调用的用量、状态、耗时和费用估算。
+CREATE TABLE IF NOT EXISTS model_usages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, -- 模型调用记录主键
+    request_id TEXT,                      -- 内部请求标识
+    trace_id TEXT NOT NULL,               -- 链路追踪 ID
+    session_id TEXT,                      -- 来源会话 ID
+    user_id INTEGER,                      -- 来源用户 ID
+    device_id TEXT,                       -- 来源设备 ID；未关联设备时为空
+    provider TEXT NOT NULL,               -- 模型供应商
+    model TEXT NOT NULL,                  -- 模型名称
+    operation TEXT NOT NULL,              -- chat、embedding、vision、asr 或 tts
+    input_tokens INTEGER,                 -- 输入 Token 数
+    output_tokens INTEGER,                -- 输出 Token 数
+    cached_input_tokens INTEGER,          -- 缓存命中输入 Token 数
+    cache_miss_tokens INTEGER,            -- 缓存未命中输入 Token 数
+    cache_creation_tokens INTEGER,        -- 创建缓存使用的 Token 数
+    reasoning_tokens INTEGER,             -- 推理 Token 数
+    total_tokens INTEGER,                 -- 总 Token 数
+    input_audio_seconds REAL,             -- ASR 输入音频秒数
+    output_audio_seconds REAL,            -- TTS 输出音频秒数
+    input_image_count INTEGER,            -- 视觉输入图片数
+    currency TEXT,                        -- 费用币种
+    estimated_cost_micros INTEGER,        -- 百万分之一货币单位的估算费用
+    provider_request_id TEXT,             -- 供应商请求 ID
+    status TEXT NOT NULL,                 -- ok 或 failed
+    duration_ms INTEGER,                  -- 调用耗时，单位毫秒
+    occurred_at DATETIME NOT NULL         -- 调用发生时间
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_usages_trace ON model_usages(trace_id);
+CREATE INDEX IF NOT EXISTS idx_model_usages_provider_model ON model_usages(provider, model, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_model_usages_time ON model_usages(occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_model_usages_user ON model_usages(user_id, occurred_at DESC);
+
+-- spans：记录一次请求中各处理步骤，parent_span_id 用于还原调用树。
+CREATE TABLE IF NOT EXISTS spans (
+    id TEXT PRIMARY KEY,           -- Span UUID
+    trace_id TEXT NOT NULL,        -- 整条调用链共享的 Trace ID
+    parent_span_id TEXT,           -- 父 Span ID；根节点为空
+    component TEXT NOT NULL,       -- handler、service 或 provider 等组件
+    operation TEXT NOT NULL,       -- 当前步骤执行的操作
+    status TEXT NOT NULL,          -- ok、error 或 cancelled
+    duration_ms INTEGER DEFAULT 0, -- 步骤耗时，单位毫秒
+    started_at DATETIME NOT NULL,  -- 开始时间
+    finished_at DATETIME,          -- 结束时间
+    attributes TEXT                -- JSON 扩展属性；不得写入密钥和对话正文
+);
+
+CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id, started_at ASC);
+CREATE INDEX IF NOT EXISTS idx_spans_parent ON spans(parent_span_id);
+
+-- model_price_snapshots：保存模型价格版本，避免用新价格重算历史费用。
+CREATE TABLE IF NOT EXISTS model_price_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, -- 价格快照主键
+    provider TEXT NOT NULL,               -- 供应商
+    model TEXT NOT NULL,                  -- 模型名称
+    effective_from DATETIME NOT NULL,     -- 价格生效时间
+    input_price REAL,                     -- 每百万输入 Token 单价
+    output_price REAL,                    -- 每百万输出 Token 单价
+    cached_input_price REAL,              -- 每百万缓存命中 Token 单价
+    cache_creation_price REAL,            -- 每百万缓存创建 Token 单价
+    unit TEXT NOT NULL,                   -- 计价单位
+    currency TEXT NOT NULL,               -- 币种
+    source_version TEXT,                  -- 价格来源版本
+    created_at DATETIME NOT NULL          -- 快照创建时间
+);
+
+CREATE INDEX IF NOT EXISTS idx_price_snapshots_provider_model_time ON model_price_snapshots(provider, model, effective_from DESC);
+CREATE INDEX IF NOT EXISTS idx_price_snapshots_provider_model ON model_price_snapshots(provider, model, created_at DESC);
+
+-- model_usage_daily：看板使用的日聚合表；空设备和系统用户使用明确零值参与唯一键。
+CREATE TABLE IF NOT EXISTS model_usage_daily (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,             -- 聚合记录主键
+    date TEXT NOT NULL,                               -- 聚合日期，格式 YYYY-MM-DD
+    device_id TEXT NOT NULL DEFAULT '',               -- 设备 ID；空字符串表示未关联设备
+    user_id INTEGER NOT NULL DEFAULT 0,               -- 用户 ID；0 表示系统级调用
+    provider TEXT NOT NULL,                           -- 供应商
+    model TEXT NOT NULL,                              -- 模型名称
+    operation TEXT NOT NULL,                          -- 模型操作类型
+    request_count INTEGER NOT NULL DEFAULT 0,         -- 请求总数
+    failed_count INTEGER NOT NULL DEFAULT 0,          -- 失败请求数
+    input_tokens INTEGER NOT NULL DEFAULT 0,          -- 输入 Token 总数
+    output_tokens INTEGER NOT NULL DEFAULT 0,         -- 输出 Token 总数
+    cached_input_tokens INTEGER NOT NULL DEFAULT 0,   -- 缓存命中 Token 总数
+    estimated_cost_micros INTEGER,                    -- 估算费用总数
+    currency TEXT                                     -- 费用币种
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_daily_date ON model_usage_daily(date DESC);
+CREATE INDEX IF NOT EXISTS idx_usage_daily_provider_model ON model_usage_daily(provider, model, date DESC);
+CREATE INDEX IF NOT EXISTS idx_usage_daily_user ON model_usage_daily(user_id, date DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_daily_unique ON model_usage_daily(date, device_id, user_id, provider, model, operation);
+
+-- memory_candidates：保存待用户确认的长期记忆候选，模型不能直接写正式记忆。
+CREATE TABLE IF NOT EXISTS memory_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,          -- 候选主键
+    user_id INTEGER NOT NULL,                      -- 所属用户
+    session_id TEXT NOT NULL,                      -- 来源会话
+    trace_id TEXT,                                 -- 来源链路
+    content TEXT NOT NULL,                         -- 候选内容
+    memory_type TEXT NOT NULL,                     -- preference、fact、instruction 或 persona
+    source TEXT NOT NULL DEFAULT 'rule',           -- rule 或 model
+    reason TEXT NOT NULL DEFAULT '',               -- 建议保存的原因
+    usage_hint TEXT NOT NULL DEFAULT '',            -- 保存后的使用方式
+    status TEXT NOT NULL DEFAULT 'pending',         -- pending、confirmed 或 rejected
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, -- 创建时间
+    resolved_at DATETIME                            -- 处理时间
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_user_status ON memory_candidates(user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_trace ON memory_candidates(trace_id);
+
+-- memories：只保存用户已经确认的正式长期记忆。
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,          -- 正式记忆主键
+    user_id INTEGER NOT NULL,                      -- 所属用户
+    candidate_id INTEGER,                          -- 来源候选；手动创建时为空
+    source_session_id TEXT,                        -- 来源会话
+    content TEXT NOT NULL,                         -- 记忆内容
+    memory_type TEXT NOT NULL,                     -- 记忆类型
+    keywords TEXT NOT NULL DEFAULT '',             -- 关键词检索文本
+    sync_version INTEGER NOT NULL DEFAULT 0,       -- 设备同步版本
+    status TEXT NOT NULL DEFAULT 'active',         -- active 或 deleted
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, -- 创建时间
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP  -- 更新时间
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_user_type ON memories(user_id, memory_type, status);
+CREATE INDEX IF NOT EXISTS idx_memories_user_keywords ON memories(user_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_candidate_unique ON memories(candidate_id) WHERE candidate_id IS NOT NULL;
+
+-- memory_versions：保存正式记忆的编辑历史；关联一致性由 Repository 事务保证。
+CREATE TABLE IF NOT EXISTS memory_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,          -- 版本主键
+    memory_id INTEGER NOT NULL,                    -- 正式记忆 ID
+    version INTEGER NOT NULL,                      -- 递增版本号
+    content TEXT NOT NULL,                         -- 此版本内容
+    keywords TEXT NOT NULL DEFAULT '',             -- 此版本关键词
+    edited_by TEXT NOT NULL DEFAULT 'user',        -- user 或 system
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP -- 版本创建时间
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_versions_memory ON memory_versions(memory_id, version DESC);
+
+-- memory_tombstones：记录删除标记，防止已删除记忆通过设备同步重新出现。
+CREATE TABLE IF NOT EXISTS memory_tombstones (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,          -- 删除标记主键
+    memory_id INTEGER NOT NULL,                    -- 被删除的记忆 ID
+    user_id INTEGER NOT NULL,                      -- 所属用户
+    sync_version INTEGER NOT NULL DEFAULT 0,       -- 删除时的同步版本
+    deleted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP -- 删除时间
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_tombstones_user ON memory_tombstones(user_id, deleted_at DESC);

@@ -30,13 +30,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// Service 负责正式记忆的查询, 编辑和删除.
-// 持有 repo(data.Repository)调数据层.
-// 候选的创建/确认/拒绝走 CandidateService, 不在这里.
-type Service struct {
-	repo data.Repository
-}
-
 // NewService 创建一个 Service.
 func NewService(repo data.Repository) *Service {
 	return &Service{repo: repo}

@@ -28,6 +28,15 @@ import (
 // InsertMemory 创建一条正式记忆.
 // 通常由 ConfirmMemoryCandidate 内部调, 也可以手动创建.
 // 执行完 GORM 自动回填 ID, CreatedAt, UpdatedAt.
+// TableName 指定 memories 表名。
+func (ormMemory) TableName() string { return "memories" }
+
+// TableName 指定 memory_versions 表名。
+func (ormMemoryVersion) TableName() string { return "memory_versions" }
+
+// TableName 指定 memory_tombstones 表名。
+func (ormMemoryTombstone) TableName() string { return "memory_tombstones" }
+
 func (r *sqliteRepo) InsertMemory(ctx context.Context, m Memory) (Memory, error) {
 	// 业务对象转 ORM 模型
 	model := memoryToORM(m)
@@ -45,7 +54,9 @@ func (r *sqliteRepo) InsertMemory(ctx context.Context, m Memory) (Memory, error)
 
 	// 写库成功后打 Debug 日志
 	logger.Debug("memories insert succeeded",
-		zap.Any("row", model),
+		zap.Int64("memory_id", model.ID),
+		zap.Int64("user_id", model.UserID),
+		zap.String("memory_type", model.MemoryType),
 	)
 	return memoryFromORM(model), nil
 }

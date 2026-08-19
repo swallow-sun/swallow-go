@@ -25,10 +25,6 @@ import (
 	"github.com/swallow-sun/swallow-go/internal/data"
 )
 
-// Policy 用确定性规则从对话中产生记忆候选.
-// 第一版不依赖模型, 只做关键词模式匹配.
-type Policy struct{}
-
 // NewPolicy 创建一个 Policy 实例.
 // Policy 无状态, 纯规则匹配, 不持有任何字段.
 func NewPolicy() *Policy {
@@ -88,7 +84,9 @@ func (p *Policy) Generate(userID int64, sessionID, traceID, userMessage string) 
 
 // matchPreference 检查用户是否表达了偏好(喜欢/不喜欢/偏好).
 // 匹配关键词: "我喜欢", "我偏好", "我更喜欢", "我不喜欢", "我讨厌",
-//             "I like", "I prefer", "I hate", "I don't like".
+//
+//	"I like", "I prefer", "I hate", "I don't like".
+//
 // 返回匹配到的 CandidateSpec 和 true; 没匹配到返回零值和 false.
 func matchPreference(userID int64, sessionID, traceID, msg string) (CandidateSpec, bool) {
 	// preferenceKeywords 是偏好类关键词列表
@@ -107,14 +105,14 @@ func matchPreference(userID int64, sessionID, traceID, msg string) (CandidateSpe
 				continue
 			}
 			return CandidateSpec{
-				UserID:      userID,
-				SessionID:   sessionID,
-				TraceID:     traceID,
-				Content:     content,
-				MemoryType:  data.MemoryTypePreference,
-				Source:      data.MemoryCandidateSourceRule,
-				Reason:      "User expressed a preference",
-				UsageHint:   "This preference may be used to adjust future responses",
+				UserID:     userID,
+				SessionID:  sessionID,
+				TraceID:    traceID,
+				Content:    content,
+				MemoryType: data.MemoryTypePreference,
+				Source:     data.MemoryCandidateSourceRule,
+				Reason:     "User expressed a preference",
+				UsageHint:  "This preference may be used to adjust future responses",
 			}, true
 		}
 	}
@@ -128,14 +126,14 @@ func matchPreference(userID int64, sessionID, traceID, msg string) (CandidateSpe
 				continue
 			}
 			return CandidateSpec{
-				UserID:      userID,
-				SessionID:   sessionID,
-				TraceID:     traceID,
-				Content:     content,
-				MemoryType:  data.MemoryTypePreference,
-				Source:      data.MemoryCandidateSourceRule,
-				Reason:      "User expressed a preference",
-				UsageHint:   "This preference may be used to adjust future responses",
+				UserID:     userID,
+				SessionID:  sessionID,
+				TraceID:    traceID,
+				Content:    content,
+				MemoryType: data.MemoryTypePreference,
+				Source:     data.MemoryCandidateSourceRule,
+				Reason:     "User expressed a preference",
+				UsageHint:  "This preference may be used to adjust future responses",
 			}, true
 		}
 	}
@@ -145,7 +143,8 @@ func matchPreference(userID int64, sessionID, traceID, msg string) (CandidateSpe
 
 // matchFact 检查用户是否陈述了关于自身的客观事实.
 // 匹配关键词: "我是", "我叫", "我做", "我的名字", "我在...工作",
-//             "I am", "My name is", "I work as".
+//
+//	"I am", "My name is", "I work as".
 func matchFact(userID int64, sessionID, traceID, msg string) (CandidateSpec, bool) {
 	lower := strings.ToLower(msg)
 
@@ -156,14 +155,14 @@ func matchFact(userID int64, sessionID, traceID, msg string) (CandidateSpec, boo
 				continue
 			}
 			return CandidateSpec{
-				UserID:      userID,
-				SessionID:   sessionID,
-				TraceID:     traceID,
-				Content:     content,
-				MemoryType:  data.MemoryTypeFact,
-				Source:      data.MemoryCandidateSourceRule,
-				Reason:      "User stated a personal fact",
-				UsageHint:   "This fact may provide context for future conversations",
+				UserID:     userID,
+				SessionID:  sessionID,
+				TraceID:    traceID,
+				Content:    content,
+				MemoryType: data.MemoryTypeFact,
+				Source:     data.MemoryCandidateSourceRule,
+				Reason:     "User stated a personal fact",
+				UsageHint:  "This fact may provide context for future conversations",
 			}, true
 		}
 	}
@@ -175,14 +174,14 @@ func matchFact(userID int64, sessionID, traceID, msg string) (CandidateSpec, boo
 				continue
 			}
 			return CandidateSpec{
-				UserID:      userID,
-				SessionID:   sessionID,
-				TraceID:     traceID,
-				Content:     content,
-				MemoryType:  data.MemoryTypeFact,
-				Source:      data.MemoryCandidateSourceRule,
-				Reason:      "User stated a personal fact",
-				UsageHint:   "This fact may provide context for future conversations",
+				UserID:     userID,
+				SessionID:  sessionID,
+				TraceID:    traceID,
+				Content:    content,
+				MemoryType: data.MemoryTypeFact,
+				Source:     data.MemoryCandidateSourceRule,
+				Reason:     "User stated a personal fact",
+				UsageHint:  "This fact may provide context for future conversations",
 			}, true
 		}
 	}
@@ -192,7 +191,8 @@ func matchFact(userID int64, sessionID, traceID, msg string) (CandidateSpec, boo
 
 // matchInstruction 检查用户是否给了助手指令(以后记住怎么做).
 // 匹配关键词: "记住", "以后", "总是", "记得", "每次",
-//             "remember to", "always", "from now on".
+//
+//	"remember to", "always", "from now on".
 func matchInstruction(userID int64, sessionID, traceID, msg string) (CandidateSpec, bool) {
 	lower := strings.ToLower(msg)
 
@@ -203,14 +203,14 @@ func matchInstruction(userID int64, sessionID, traceID, msg string) (CandidateSp
 				continue
 			}
 			return CandidateSpec{
-				UserID:      userID,
-				SessionID:   sessionID,
-				TraceID:     traceID,
-				Content:     content,
-				MemoryType:  data.MemoryTypeInstruction,
-				Source:      data.MemoryCandidateSourceRule,
-				Reason:      "User gave an instruction to remember",
-				UsageHint:   "This instruction may be applied to future responses",
+				UserID:     userID,
+				SessionID:  sessionID,
+				TraceID:    traceID,
+				Content:    content,
+				MemoryType: data.MemoryTypeInstruction,
+				Source:     data.MemoryCandidateSourceRule,
+				Reason:     "User gave an instruction to remember",
+				UsageHint:  "This instruction may be applied to future responses",
 			}, true
 		}
 	}
@@ -222,14 +222,14 @@ func matchInstruction(userID int64, sessionID, traceID, msg string) (CandidateSp
 				continue
 			}
 			return CandidateSpec{
-				UserID:      userID,
-				SessionID:   sessionID,
-				TraceID:     traceID,
-				Content:     content,
-				MemoryType:  data.MemoryTypeInstruction,
-				Source:      data.MemoryCandidateSourceRule,
-				Reason:      "User gave an instruction to remember",
-				UsageHint:   "This instruction may be applied to future responses",
+				UserID:     userID,
+				SessionID:  sessionID,
+				TraceID:    traceID,
+				Content:    content,
+				MemoryType: data.MemoryTypeInstruction,
+				Source:     data.MemoryCandidateSourceRule,
+				Reason:     "User gave an instruction to remember",
+				UsageHint:  "This instruction may be applied to future responses",
 			}, true
 		}
 	}
@@ -239,7 +239,9 @@ func matchInstruction(userID int64, sessionID, traceID, msg string) (CandidateSp
 
 // matchPersona 检查用户是否描述了自己的身份/职业/设备等.
 // 匹配关键词: "我是...用户", "我用...设备", "我开...车",
-//             "我是...工程师/设计师/老师/学生", "我做...开发".
+//
+//	"我是...工程师/设计师/老师/学生", "我做...开发".
+//
 // 这条规则和 fact 有重叠, 但 persona 更侧重身份标签.
 func matchPersona(userID int64, sessionID, traceID, msg string) (CandidateSpec, bool) {
 	// personaKeywords 是人设类关键词列表
@@ -249,14 +251,14 @@ func matchPersona(userID int64, sessionID, traceID, msg string) (CandidateSpec, 
 			// 人设规则取整条消息作为内容, 不截取
 			// 因为人设描述通常是一整句, 截取关键词后面的部分可能丢失上下文
 			return CandidateSpec{
-				UserID:      userID,
-				SessionID:   sessionID,
-				TraceID:     traceID,
-				Content:     strings.TrimSpace(msg),
-				MemoryType:  data.MemoryTypePersona,
-				Source:      data.MemoryCandidateSourceRule,
-				Reason:      "User described their persona or identity",
-				UsageHint:   "This persona may help tailor responses to the user's background",
+				UserID:     userID,
+				SessionID:  sessionID,
+				TraceID:    traceID,
+				Content:    strings.TrimSpace(msg),
+				MemoryType: data.MemoryTypePersona,
+				Source:     data.MemoryCandidateSourceRule,
+				Reason:     "User described their persona or identity",
+				UsageHint:  "This persona may help tailor responses to the user's background",
 			}, true
 		}
 	}

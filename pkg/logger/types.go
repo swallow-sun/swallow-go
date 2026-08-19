@@ -12,6 +12,8 @@ const (
 	EnvironmentDevelopment = "development"
 	// EnvironmentProduction 生产环境,对应 zap 的 NewProduction 模式.
 	EnvironmentProduction = "production"
+	// MaxDebugSQLLength 限制开发环境单条 SQL 日志长度，防止异常语句撑爆日志文件。
+	MaxDebugSQLLength = 4096
 )
 
 // HertzAdapter 把 Hertz 框架日志转发到项目唯一的全局 logger.
@@ -21,3 +23,6 @@ const (
 type HertzAdapter struct {
 	level hlog.Level // 当前允许输出的最低 Hertz 日志级别
 }
+
+// gormLogger 把 GORM 内部日志安全转发到项目 logger。
+type gormLogger struct{}

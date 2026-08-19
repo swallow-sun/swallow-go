@@ -11,13 +11,14 @@
 //   - biz/handler/memory.go: HTTP 入口, 解析请求参数, 调 MemoryService, 写 JSON 响应.
 //
 // 方案 16.11.1 节的 7 个 API:
-//   POST   /api/v1/memory-candidates         → CreateCandidate
-//   GET    /api/v1/memory-candidates           → ListCandidates
-//   POST   /api/v1/memory-candidates/{id}/confirm → ConfirmCandidate
-//   POST   /api/v1/memory-candidates/{id}/reject  → RejectCandidate
-//   GET    /api/v1/memories                     → ListMemories
-//   PATCH  /api/v1/memories/{id}               → UpdateMemory
-//   DELETE /api/v1/memories/{id}               → DeleteMemory
+//
+//	POST   /api/v1/memory-candidates         → CreateCandidate
+//	GET    /api/v1/memory-candidates           → ListCandidates
+//	POST   /api/v1/memory-candidates/{id}/confirm → ConfirmCandidate
+//	POST   /api/v1/memory-candidates/{id}/reject  → RejectCandidate
+//	GET    /api/v1/memories                     → ListMemories
+//	PATCH  /api/v1/memories/{id}               → UpdateMemory
+//	DELETE /api/v1/memories/{id}               → DeleteMemory
 package service
 
 import (
@@ -27,17 +28,6 @@ import (
 	"github.com/swallow-sun/swallow-go/internal/data"
 	"github.com/swallow-sun/swallow-go/internal/memory"
 )
-
-// MemoryService 是记忆相关的业务编排层.
-// 持有 memory 包的三个组件:
-//   - candidate: 候选创建/确认/拒绝/查询
-//   - retriever: 记忆检索
-//   - memService: 记忆 CRUD + 编辑 + 删除
-type MemoryService struct {
-	candidate *memory.CandidateService
-	retriever *memory.Retriever
-	memService *memory.Service
-}
 
 // NewMemoryService 创建一个 MemoryService.
 // 入参是 service.Deps, 里面有 repo, 用 repo 构造 memory 包的三个组件.
@@ -58,11 +48,6 @@ func NewMemoryService(deps *Deps) *MemoryService {
 	}
 }
 
-// CreateCandidateResult 是 CreateCandidate 的返回值.
-type CreateCandidateResult struct {
-	Candidate data.MemoryCandidate `json:"candidate"`
-}
-
 // CreateCandidate 手动提交一条记忆候选.
 // 方案 16.11.1 节: POST /api/v1/memory-candidates.
 func (s *MemoryService) CreateCandidate(
@@ -72,14 +57,14 @@ func (s *MemoryService) CreateCandidate(
 ) (CreateCandidateResult, error) {
 	// 构造 CandidateSpec
 	spec := memory.CandidateSpec{
-		UserID:      userID,
-		SessionID:   sessionID,
-		TraceID:     traceID,
-		Content:     content,
-		MemoryType:  memoryType,
-		Source:      data.MemoryCandidateSourceRule,
-		Reason:      reason,
-		UsageHint:   usageHint,
+		UserID:     userID,
+		SessionID:  sessionID,
+		TraceID:    traceID,
+		Content:    content,
+		MemoryType: memoryType,
+		Source:     data.MemoryCandidateSourceRule,
+		Reason:     reason,
+		UsageHint:  usageHint,
 	}
 
 	candidate, err := s.candidate.CreateCandidate(ctx, spec)
@@ -88,11 +73,6 @@ func (s *MemoryService) CreateCandidate(
 	}
 
 	return CreateCandidateResult{Candidate: candidate}, nil
-}
-
-// ListCandidatesResult 是 ListCandidates 的返回值.
-type ListCandidatesResult struct {
-	Items []data.MemoryCandidate `json:"items"`
 }
 
 // ListCandidates 按用户 ID 和状态查候选列表.
@@ -114,11 +94,6 @@ func (s *MemoryService) ListCandidates(
 	}
 
 	return ListCandidatesResult{Items: candidates}, nil
-}
-
-// ConfirmCandidateResult 是 ConfirmCandidate 的返回值.
-type ConfirmCandidateResult struct {
-	Memory data.Memory `json:"memory"`
 }
 
 // ConfirmCandidate 确认候选, 写入正式记忆.
@@ -147,11 +122,6 @@ func (s *MemoryService) RejectCandidate(
 	return nil
 }
 
-// ListMemoriesResult 是 ListMemories 的返回值.
-type ListMemoriesResult struct {
-	Items []data.Memory `json:"items"`
-}
-
 // ListMemories 按用户 ID 查正式记忆列表.
 // 方案 16.11.1 节: GET /api/v1/memories.
 func (s *MemoryService) ListMemories(
@@ -169,11 +139,6 @@ func (s *MemoryService) ListMemories(
 	}
 
 	return ListMemoriesResult{Items: rows}, nil
-}
-
-// UpdateMemoryResult 是 UpdateMemory 的返回值.
-type UpdateMemoryResult struct {
-	Memory data.Memory `json:"memory"`
 }
 
 // UpdateMemory 编辑记忆内容 + 关键词.

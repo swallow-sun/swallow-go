@@ -25,16 +25,22 @@ import (
 
 // ormUser 对应 users 表:注册用户
 func (ormUser) TableName() string { return "users" }
+
 // ormSession 对应 sessions 表:聊天会话
 func (ormSession) TableName() string { return "sessions" }
+
 // ormDialogue 对应 dialogues 表:对话消息(每轮对话里的一条消息)
 func (ormDialogue) TableName() string { return "dialogues" }
+
 // ormEvent 对应 events 表:会话事件埋点
 func (ormEvent) TableName() string { return "events" }
+
 // ormChatRequest 对应 chat_requests 表:聊天请求记录(幂等用的)
 func (ormChatRequest) TableName() string { return "chat_requests" }
+
 // ormAppSetting 对应 app_settings 表:运行配置(明文保存)
 func (ormAppSetting) TableName() string { return "app_settings" }
+
 // ormEncryptedSecret 对应 encrypted_secrets 表:加密密钥(密文保存)
 func (ormEncryptedSecret) TableName() string { return "encrypted_secrets" }
 
@@ -58,9 +64,10 @@ func (r *sqliteRepo) CreateUser(ctx context.Context, name, role string) (User, e
 		return User{}, fmt.Errorf("insert user: %w", err)
 	}
 
-	// 写库成功后打 Debug 日志,用 zap.Any 打写入后的完整 model
+	// 不记录完整用户对象，避免后续身份特征字段进入日志。
 	logger.Debug("users insert succeeded",
-		zap.Any("row", model),
+		zap.Int64("user_id", model.ID),
+		zap.String("role", model.Role),
 	)
 
 	// 把 ORM 模型转成业务对象返回,去掉 GORM 的标签和指针类型
@@ -140,7 +147,8 @@ func (r *sqliteRepo) CreateSession(ctx context.Context, sessionID string, userID
 	}
 
 	logger.Debug("sessions insert succeeded",
-		zap.Any("row", model),
+		zap.String("session_id", model.ID),
+		zap.Int64("user_id", model.UserID),
 	)
 	return sessionFromORM(model), nil
 }
@@ -210,9 +218,12 @@ func (r *sqliteRepo) InsertDialogue(ctx context.Context, sessionID string, userI
 		return Dialogue{}, fmt.Errorf("insert dialogue: %w", err)
 	}
 
-	// 写库成功后打 Debug 日志,用 zap.Any 打写入后的完整 model(含 content,token,timestamp 等所有字段)
+	// 只记录消息标识、角色和长度，禁止把对话正文写入日志。
 	logger.Debug("dialogues insert succeeded",
-		zap.Any("row", model),
+		zap.Int64("dialogue_id", model.ID),
+		zap.String("trace_id", model.TraceID),
+		zap.String("role", model.Role),
+		zap.Int("content_bytes", len(model.Content)),
 	)
 
 	// 转成业务对象返回,调用的人能拿到 ID 和时间
@@ -310,9 +321,11 @@ func (r *sqliteRepo) InsertEvent(ctx context.Context, eventType string, userID *
 		return fmt.Errorf("insert event: %w", err)
 	}
 
-	// 写库成功后打 Debug 日志,用 zap.Any 打写入后的完整 model(含 data,duration,timestamp 等所有字段)
+	// 事件正文已经持久化，不在普通日志中重复输出。
 	logger.Debug("events insert succeeded",
-		zap.Any("row", model),
+		zap.Int64("event_id", model.ID),
+		zap.String("event_type", model.EventType),
+		zap.String("trace_id", model.TraceID),
 	)
 
 	return nil

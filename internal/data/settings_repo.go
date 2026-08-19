@@ -51,7 +51,7 @@ func (r *sqliteRepo) CreateAppSettingIfAbsent(ctx context.Context, setting AppSe
 
 	// RowsAffected == 1 说明插成功了(新建),== 0 说明冲突了(已存在)
 	logger.Debug("app_settings insert completed",
-		zap.Any("row", model),
+		zap.String("setting_key", model.Key),
 		zap.Bool("created", result.RowsAffected == 1),
 	)
 	return result.RowsAffected == 1, nil
@@ -83,7 +83,7 @@ func (r *sqliteRepo) UpsertAppSetting(ctx context.Context, setting AppSetting) e
 	}
 
 	logger.Debug("app_settings upsert succeeded",
-		zap.Any("row", model),
+		zap.String("setting_key", model.Key),
 	)
 	return nil
 }

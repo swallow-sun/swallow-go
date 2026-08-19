@@ -65,7 +65,9 @@ func (r *sqliteRepo) BeginChatRequest(ctx context.Context, clientMessageID, sess
 	if result.RowsAffected == 1 {
 		// 新建成功,把模型转成业务对象返回,created=true
 		logger.Debug("chat_requests insert succeeded",
-			zap.Any("row", model),
+			zap.Int64("request_id", model.ID),
+			zap.String("trace_id", model.TraceID),
+			zap.String("status", model.Status),
 		)
 		return chatRequestFromORM(model), true, nil
 	}
@@ -135,10 +137,10 @@ func (r *sqliteRepo) CompleteChatRequest(ctx context.Context, requestID int64, a
 	// .Where("id = ? AND status = ?", ...) 按 ID 找,同时要求当前状态是 running
 	//   防呆:只有 running 状态的才能标记 completed,不能从 accepted 直接跳到 completed
 	updates := map[string]any{
-		"status":               ChatRequestStatusCompleted,
+		"status":                ChatRequestStatusCompleted,
 		"assistant_dialogue_id": assistantDialogueID,
-		"completed_at":         completedAt,
-		"error_code":           nil,
+		"completed_at":          completedAt,
+		"error_code":            nil,
 	}
 	result := r.db.WithContext(ctx).Model(&ormChatRequest{}).
 		Where("id = ? AND status = ?", requestID, ChatRequestStatusRunning).

@@ -12,14 +12,6 @@ import (
 	"fmt"
 )
 
-// HistoryResultLimit 是默认查询的对话条数上限.
-const HistoryResultLimit = 50
-
-// HistoryService 负责历史查询业务逻辑.
-type HistoryService struct {
-	deps *Deps
-}
-
 // NewHistoryService 创建一个 HistoryService.
 func NewHistoryService(deps *Deps) *HistoryService {
 	return &HistoryService{deps: deps}

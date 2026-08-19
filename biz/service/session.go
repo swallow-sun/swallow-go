@@ -17,11 +17,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// SessionService 负责会话相关业务逻辑.
-type SessionService struct {
-	deps *Deps
-}
-
 // NewSessionService 创建一个 SessionService.
 func NewSessionService(deps *Deps) *SessionService {
 	return &SessionService{deps: deps}
@@ -75,7 +70,7 @@ func (s *SessionService) CreateSession(ctx context.Context, userName string) (Cr
 
 	return CreateSessionResult{
 		SessionID: sessionID, // 新创建的会话 ID(UUID)
-		UserName:  user.Name,  // 用户名
-		UserID:    user.ID,    // 用户在数据库里的自增 ID
+		UserName:  user.Name, // 用户名
+		UserID:    user.ID,   // 用户在数据库里的自增 ID
 	}, nil
 }

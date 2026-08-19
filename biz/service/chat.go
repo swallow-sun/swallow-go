@@ -23,7 +23,10 @@ import (
 	"time"
 
 	"github.com/swallow-sun/swallow-go/internal/agent"
+	"github.com/swallow-sun/swallow-go/internal/config"
 	"github.com/swallow-sun/swallow-go/internal/data"
+	"github.com/swallow-sun/swallow-go/internal/identity"
+	"github.com/swallow-sun/swallow-go/internal/memory"
 	"github.com/swallow-sun/swallow-go/internal/provider/llm"
 	"github.com/swallow-sun/swallow-go/internal/telemetry"
 	"github.com/swallow-sun/swallow-go/internal/trace"
@@ -31,9 +34,26 @@ import (
 	"go.uber.org/zap"
 )
 
-// ChatService 负责对话业务逻辑.
-type ChatService struct {
-	deps *Deps
+// Error 返回稳定业务错误码，使 ChatError 满足 Go 的 error 接口。
+func (e *ChatError) Error() string { return e.Code }
+
+// NewChatError 创建可由 handler 映射为 HTTP 响应的聊天业务错误。
+func NewChatError(statusCode int, code, traceID string) *ChatError {
+	return &ChatError{StatusCode: statusCode, Code: code, TraceID: traceID}
+}
+
+// FromChatError 从包装错误链中提取 ChatError；不存在时返回 nil。
+func FromChatError(err error) *ChatError {
+	var chatErr *ChatError
+	if errors.As(err, &chatErr) {
+		return chatErr
+	}
+	return nil
+}
+
+// NewDeps 组装 service 层共享依赖，所有服务共用同一份实例。
+func NewDeps(cfg *config.Config, repo data.Repository, idm *identity.Manager, mem *memory.Store, provider llm.Provider) *Deps {
+	return &Deps{cfg: cfg, repo: repo, idm: idm, mem: mem, llm: provider}
 }
 
 // NewChatService 创建一个 ChatService.
@@ -276,28 +296,28 @@ func (s *ChatService) streamLoop(
 	// 当前阶段没有价格快照表, estimated_cost_micros 留空(nil), 等 model_price_snapshots 建好后再填.
 	// llm.Usage 里的 int 字段转成 *int 指针: 供应商返回了 0 就是 &0, 没返回的字段传 nil.
 	modelUsage := data.ModelUsage{
-		RequestID:         traceID,                           // 内部请求标识, 目前用 trace_id
-		TraceID:           traceID,                           // 链路追踪 ID
-		SessionID:         chatRequest.SessionID,             // 哪个会话产生的
-		UserID:            chatRequest.UserID,                // 哪个用户产生的
-		Provider:          s.deps.cfg.LLM.Provider,          // 供应商名称, 如 "deepseek"
-		Model:             s.deps.cfg.LLM.Model,              // 模型名, 如 "deepseek-chat"
-		Operation:         data.ModelOperationChat,           // 操作类型: 文字对话
-		InputTokens:       data.IntPtr(usage.PromptTokens),              // 输入 Token 总量
-		OutputTokens:      data.IntPtr(usage.CompletionTokens),           // 输出 Token 数
-		CachedInputTokens: data.IntPtr(usage.CacheHitTokens()),            // 缓存命中输入 Token
-		CacheMissTokens:   data.IntPtr(usage.CacheMissTokens()),           // 缓存未命中输入 Token(DeepSeek 返回 prompt_cache_miss_tokens)
+		RequestID:         traceID,                              // 内部请求标识, 目前用 trace_id
+		TraceID:           traceID,                              // 链路追踪 ID
+		SessionID:         chatRequest.SessionID,                // 哪个会话产生的
+		UserID:            chatRequest.UserID,                   // 哪个用户产生的
+		Provider:          s.deps.cfg.LLM.Provider,              // 供应商名称, 如 "deepseek"
+		Model:             s.deps.cfg.LLM.Model,                 // 模型名, 如 "deepseek-chat"
+		Operation:         data.ModelOperationChat,              // 操作类型: 文字对话
+		InputTokens:       data.IntPtr(usage.PromptTokens),      // 输入 Token 总量
+		OutputTokens:      data.IntPtr(usage.CompletionTokens),  // 输出 Token 数
+		CachedInputTokens: data.IntPtr(usage.CacheHitTokens()),  // 缓存命中输入 Token
+		CacheMissTokens:   data.IntPtr(usage.CacheMissTokens()), // 缓存未命中输入 Token(DeepSeek 返回 prompt_cache_miss_tokens)
 		// CacheCreationTokens 留 nil: 当前用 DeepSeek/OpenAI, 不返回缓存创建 Token(Anthropic 才有)
 		// ReasoningTokens 只有推理模型才返回, 普通对话模型返回 0, 这里如实保存
-		ReasoningTokens:   data.IntPtr(usage.CompletionTokensDetails.ReasoningTokens),
-		TotalTokens:       data.IntPtr(usage.TotalTokens),               // 总 Token 数
+		ReasoningTokens: data.IntPtr(usage.CompletionTokensDetails.ReasoningTokens),
+		TotalTokens:     data.IntPtr(usage.TotalTokens), // 总 Token 数
 		// 音频和图片相关字段留 nil: 当前只有文字对话, 没有 ASR/TTS/视觉
-		Currency:          "",                               // 无费用估算, 币种留空
+		Currency: "", // 无费用估算, 币种留空
 		// EstimatedCostMicros 留 nil: 等价格快照表建好后再填
-		ProviderRequestID: "",                               // 供应商请求 ID, 有些供应商不返回
-		Status:            data.ModelUsageStatusOK,          // 调用成功
-		DurationMs:        metrics.TotalDurationMs,          // 总耗时(毫秒)
-		OccurredAt:        time.Now(),                       // 调用发生时间
+		ProviderRequestID: "",                      // 供应商请求 ID, 有些供应商不返回
+		Status:            data.ModelUsageStatusOK, // 调用成功
+		DurationMs:        metrics.TotalDurationMs, // 总耗时(毫秒)
+		OccurredAt:        time.Now(),              // 调用发生时间
 	}
 	if err := s.deps.repo.InsertModelUsage(finishCtx, modelUsage); err != nil {
 		// 写入失败不能静默丢失, 记 ERROR 日志, 但不阻断主流程(对话已经成功了)
@@ -344,12 +364,12 @@ func (s *ChatService) streamLoop(
 	usageData := &UsageData{
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
-		CacheHitTokens:    usage.CacheHitTokens(),   // 缓存命中算出来的
-		CacheMissTokens:   usage.CacheMissTokens(),   // 缓存未命中算出来的
-		ReasoningTokens:   usage.CompletionTokensDetails.ReasoningTokens, // 思维链 token 数
-		TotalTokens:       usage.TotalTokens,
-		FirstTokenMs:      metrics.FirstTokenMs,    // 首 token 耗时(毫秒)
-		TotalDurationMs:   metrics.TotalDurationMs, // 总耗时(毫秒)
+		CacheHitTokens:   usage.CacheHitTokens(),                        // 缓存命中算出来的
+		CacheMissTokens:  usage.CacheMissTokens(),                       // 缓存未命中算出来的
+		ReasoningTokens:  usage.CompletionTokensDetails.ReasoningTokens, // 思维链 token 数
+		TotalTokens:      usage.TotalTokens,
+		FirstTokenMs:     metrics.FirstTokenMs,    // 首 token 耗时(毫秒)
+		TotalDurationMs:  metrics.TotalDurationMs, // 总耗时(毫秒)
 	}
 	// 通过 ChatEventUsage 事件发给 handler, handler 转成 SSE usage 帧写给客户端
 	sendEvent(events, ChatEvent{Type: ChatEventUsage, Usage: usageData, TraceID: traceID})
@@ -364,12 +384,12 @@ func (s *ChatService) streamLoop(
 	telemetry.Emit(finishCtx,
 		telemetry.EventMessageCompleted,
 		map[string]any{
-			"session_id":            chatRequest.SessionID,
-			telemetry.FieldStatus:   telemetry.StatusOK,
+			"session_id":              chatRequest.SessionID,
+			telemetry.FieldStatus:     telemetry.StatusOK,
 			telemetry.FieldDurationMS: metrics.TotalDurationMs,
-			"prompt_tokens":         usage.PromptTokens,
-			"completion_tokens":     usage.CompletionTokens,
-			"total_tokens":          usage.TotalTokens,
+			"prompt_tokens":           usage.PromptTokens,
+			"completion_tokens":       usage.CompletionTokens,
+			"total_tokens":            usage.TotalTokens,
 		},
 	)
 }
@@ -404,7 +424,7 @@ func (s *ChatService) handleExistingChatRequest(ctx context.Context, request dat
 			// errors.Is(err, sql.ErrNoRows) 判断 err 是不是 "查不到记录" 这个错误
 			// sql.ErrNoRows 是 Go 标准库 database/sql 里定义的, 表示查询结果为空
 			// !errors.Is(...) 取反: 不是 "查不到", 说明是真正的数据库错误(连接断了等)
-			} else if !errors.Is(err, sql.ErrNoRows) {
+		} else if !errors.Is(err, sql.ErrNoRows) {
 			// 不是"没找到"而是真正的数据库错误
 			logger.Error("Failed to query assistant message for chat request recovery",
 				zap.Error(err),
@@ -451,10 +471,10 @@ func (s *ChatService) handleExistingChatRequest(ctx context.Context, request dat
 			Usage: &UsageData{
 				PromptTokens:     dialogue.PromptTokens,
 				CompletionTokens: dialogue.CompletionTokens,
-				CacheHitTokens:    dialogue.CacheHitTokens,
-				CacheMissTokens:   dialogue.CacheMissTokens,
-				ReasoningTokens:   dialogue.ReasoningTokens,
-				TotalTokens:       dialogue.TotalTokens,
+				CacheHitTokens:   dialogue.CacheHitTokens,
+				CacheMissTokens:  dialogue.CacheMissTokens,
+				ReasoningTokens:  dialogue.ReasoningTokens,
+				TotalTokens:      dialogue.TotalTokens,
 			},
 			Replayed: true,
 			TraceID:  request.TraceID,

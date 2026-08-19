@@ -15,8 +15,6 @@ package data
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
@@ -28,6 +26,9 @@ import (
 // InsertMemoryCandidate 创建一条记忆候选.
 // status 初始为 pending, created_at 自动填.
 // 执行完 GORM 自动回填 ID 和 CreatedAt.
+// TableName 指定 memory_candidates 表名。
+func (ormMemoryCandidate) TableName() string { return "memory_candidates" }
+
 func (r *sqliteRepo) InsertMemoryCandidate(ctx context.Context, c MemoryCandidate) (MemoryCandidate, error) {
 	// 业务对象转 ORM 模型
 	model := memoryCandidateToORM(c)
@@ -44,9 +45,11 @@ func (r *sqliteRepo) InsertMemoryCandidate(ctx context.Context, c MemoryCandidat
 		return MemoryCandidate{}, fmt.Errorf("insert memory candidate: %w", err)
 	}
 
-	// 写库成功后打 Debug 日志, 用 zap.Any 打写入后的完整 model
+	// 只记录标识和类型，不把候选记忆正文写入日志。
 	logger.Debug("memory_candidates insert succeeded",
-		zap.Any("row", model),
+		zap.Int64("candidate_id", model.ID),
+		zap.Int64("user_id", model.UserID),
+		zap.String("memory_type", model.MemoryType),
 	)
 	return memoryCandidateFromORM(model), nil
 }
@@ -119,12 +122,17 @@ func (r *sqliteRepo) ConfirmMemoryCandidate(ctx context.Context, id int64, userI
 	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 1. 把候选状态改成 confirmed, 记录 resolved_at
 		now := time.Now()
-		if err := tx.Model(&ormMemoryCandidate{}).Where("id = ? AND status = ?", id, MemoryCandidateStatusPending).
+		result := tx.Model(&ormMemoryCandidate{}).
+			Where("id = ? AND user_id = ? AND status = ?", id, userID, MemoryCandidateStatusPending).
 			Updates(map[string]any{
 				"status":      MemoryCandidateStatusConfirmed,
 				"resolved_at": now,
-			}).Error; err != nil {
-			return fmt.Errorf("update candidate status: %w", err)
+			})
+		if result.Error != nil {
+			return fmt.Errorf("update candidate status: %w", result.Error)
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("candidate %d was already resolved", id)
 		}
 
 		// 2. 写入正式记忆
@@ -146,11 +154,11 @@ func (r *sqliteRepo) ConfirmMemoryCandidate(ctx context.Context, id int64, userI
 
 		// 3. 写一条初始版本记录到 memory_versions (version=1)
 		ormVer := ormMemoryVersion{
-			MemoryID: ormMem.ID,
-			Version:  1,
-			Content:  candidate.Content,
-			Keywords: "",
-			EditedBy: "system",
+			MemoryID:  ormMem.ID,
+			Version:   1,
+			Content:   candidate.Content,
+			Keywords:  "",
+			EditedBy:  "system",
 			CreatedAt: now,
 		}
 		if err := tx.Create(&ormVer).Error; err != nil {
@@ -182,13 +190,13 @@ func (r *sqliteRepo) ConfirmMemoryCandidate(ctx context.Context, id int64, userI
 // RejectMemoryCandidate 把候选状态从 pending 改成 rejected.
 // 拒绝后不写正式记忆, 同一候选不会再次弹出.
 // 方案 16.11.4 节: "用户拒绝候选后, 不因重新登录再次弹出同一候选".
-func (r *sqliteRepo) RejectMemoryCandidate(ctx context.Context, id int64) error {
+func (r *sqliteRepo) RejectMemoryCandidate(ctx context.Context, id int64, userID int64) error {
 	// .Model(&ormMemoryCandidate{}) 指定操作 memory_candidates 表
 	// .Where("id = ? AND status = ?", id, MemoryCandidateStatusPending) 只改 pending 状态的
 	// .Updates(...) 更新 status 和 resolved_at
 	now := time.Now()
 	result := r.db.WithContext(ctx).Model(&ormMemoryCandidate{}).
-		Where("id = ? AND status = ?", id, MemoryCandidateStatusPending).
+		Where("id = ? AND user_id = ? AND status = ?", id, userID, MemoryCandidateStatusPending).
 		Updates(map[string]any{
 			"status":      MemoryCandidateStatusRejected,
 			"resolved_at": now,
@@ -214,18 +222,18 @@ func (r *sqliteRepo) RejectMemoryCandidate(ctx context.Context, id int64) error 
 // string 类型的可空字段转成 *string(空字符串 → nil).
 func memoryCandidateToORM(c MemoryCandidate) ormMemoryCandidate {
 	return ormMemoryCandidate{
-		ID:          c.ID,
-		UserID:      c.UserID,
-		SessionID:   c.SessionID,
-		TraceID:     stringToPtr(c.TraceID),
-		Content:     c.Content,
-		MemoryType:  c.MemoryType,
-		Source:      c.Source,
-		Reason:      c.Reason,
-		UsageHint:   c.UsageHint,
-		Status:      c.Status,
-		CreatedAt:   c.CreatedAt,
-		ResolvedAt:  timeToPtr(c.ResolvedAt),
+		ID:         c.ID,
+		UserID:     c.UserID,
+		SessionID:  c.SessionID,
+		TraceID:    stringToPtr(c.TraceID),
+		Content:    c.Content,
+		MemoryType: c.MemoryType,
+		Source:     c.Source,
+		Reason:     c.Reason,
+		UsageHint:  c.UsageHint,
+		Status:     c.Status,
+		CreatedAt:  c.CreatedAt,
+		ResolvedAt: timeToPtr(c.ResolvedAt),
 	}
 }
 
@@ -233,18 +241,18 @@ func memoryCandidateToORM(c MemoryCandidate) ormMemoryCandidate {
 // 指针字段转成普通类型: nil → 零值.
 func memoryCandidateFromORM(m ormMemoryCandidate) MemoryCandidate {
 	return MemoryCandidate{
-		ID:          m.ID,
-		UserID:      m.UserID,
-		SessionID:   m.SessionID,
-		TraceID:     ptrToString(m.TraceID),
-		Content:     m.Content,
-		MemoryType:  m.MemoryType,
-		Source:      m.Source,
-		Reason:      m.Reason,
-		UsageHint:   m.UsageHint,
-		Status:      m.Status,
-		CreatedAt:   m.CreatedAt,
-		ResolvedAt:  ptrToTime(m.ResolvedAt),
+		ID:         m.ID,
+		UserID:     m.UserID,
+		SessionID:  m.SessionID,
+		TraceID:    ptrToString(m.TraceID),
+		Content:    m.Content,
+		MemoryType: m.MemoryType,
+		Source:     m.Source,
+		Reason:     m.Reason,
+		UsageHint:  m.UsageHint,
+		Status:     m.Status,
+		CreatedAt:  m.CreatedAt,
+		ResolvedAt: ptrToTime(m.ResolvedAt),
 	}
 }
 
@@ -263,7 +271,3 @@ func ptrToTime(t *time.Time) time.Time {
 	}
 	return *t
 }
-
-// 兼容 errors.Is(sql.ErrNoRows) 的引用, 防止 import 被编译器移除.
-var _ = errors.Is
-var _ = sql.ErrNoRows

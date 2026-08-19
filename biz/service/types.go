@@ -12,8 +12,6 @@
 package service
 
 import (
-	"errors"
-
 	"github.com/swallow-sun/swallow-go/internal/config"
 	"github.com/swallow-sun/swallow-go/internal/data"
 	"github.com/swallow-sun/swallow-go/internal/identity"
@@ -25,21 +23,96 @@ import (
 // 客户端根据错误码判断是重试, 换 session 还是直接展示错误.
 // const ( ... ) 是一组常量的集合声明, 每个常量代表一种错误场景
 const (
+	// HistoryResultLimit 是默认查询的对话条数上限。
+	HistoryResultLimit = 50
 	// 下面每个常量都是 string 类型, 值就是错误码字符串
 	ChatErrorAgentInit      = "agent_init_failed"        // Agent 创建失败(系统提示词文件缺失等)
 	ChatErrorConnect        = "llm_connect_failed"       // LLM 流式连接失败(网络/鉴权问题)
 	ChatErrorStreamRead     = "llm_stream_read_failed"   // 流式读取中途出错(连接断开等)
-	ChatErrorClientClosed  = "client_stream_closed"     // 客户端断开连接(写 SSE 失败)
-	ChatErrorUserMissing   = "user_dialogue_missing"   // 连接成功但用户消息未找到(内部状态不一致)
-	ChatErrorAssistantSave = "assistant_save_failed"    // 助手回复保存失败(数据库写入失败)
-	ChatErrorRequestState  = "request_state_failed"    // 幂等请求状态更新失败
-	ChatErrorRequestFailed = "chat_request_failed"     // 之前的同幂等键请求已失败, 不会自动重试
-	ChatErrorResultMissing = "chat_result_missing"      // 请求标记已完成但找不到助手消息
+	ChatErrorClientClosed   = "client_stream_closed"     // 客户端断开连接(写 SSE 失败)
+	ChatErrorUserMissing    = "user_dialogue_missing"    // 连接成功但用户消息未找到(内部状态不一致)
+	ChatErrorAssistantSave  = "assistant_save_failed"    // 助手回复保存失败(数据库写入失败)
+	ChatErrorRequestState   = "request_state_failed"     // 幂等请求状态更新失败
+	ChatErrorRequestFailed  = "chat_request_failed"      // 之前的同幂等键请求已失败, 不会自动重试
+	ChatErrorResultMissing  = "chat_result_missing"      // 请求标记已完成但找不到助手消息
 	ChatErrorRequestRunning = "chat_request_in_progress" // 同一幂等键请求仍在进行中
 
 	// MaxClientMessageIDLength 是 client_message_id 的最大长度, 防止超长字符串撑爆数据库.
 	MaxClientMessageIDLength = 128
+	// MaxDashboardRangeDays 限制单次看板查询跨度，避免无界扫描。
+	MaxDashboardRangeDays = 366
 )
+
+// DashboardService 负责看板只读聚合查询。
+type DashboardService struct {
+	deps *Deps
+}
+
+// DashboardModelUsageItem 是一条模型日聚合记录。
+type DashboardModelUsageItem struct {
+	Date                string `json:"date"`
+	UserID              int64  `json:"user_id"`
+	Provider            string `json:"provider"`
+	Model               string `json:"model"`
+	Operation           string `json:"operation"`
+	RequestCount        int64  `json:"request_count"`
+	FailedCount         int64  `json:"failed_count"`
+	InputTokens         int64  `json:"input_tokens"`
+	OutputTokens        int64  `json:"output_tokens"`
+	CachedInputTokens   int64  `json:"cached_input_tokens"`
+	EstimatedCostMicros *int64 `json:"estimated_cost_micros,omitempty"`
+	Currency            string `json:"currency,omitempty"`
+}
+
+// DashboardModelUsageResult 是模型用量看板的日期范围响应。
+type DashboardModelUsageResult struct {
+	From  string                    `json:"from"`
+	To    string                    `json:"to"`
+	Items []DashboardModelUsageItem `json:"items"`
+}
+
+// DashboardValidationError 表示客户端提供的看板查询参数不合法。
+type DashboardValidationError struct {
+	Message string
+}
+
+// ChatService 负责对话业务逻辑。
+type ChatService struct {
+	deps *Deps /* service 层共享依赖 */
+}
+
+// SessionService 负责会话业务逻辑。
+type SessionService struct {
+	deps *Deps /* service 层共享依赖 */
+}
+
+// HistoryService 负责历史查询业务逻辑。
+type HistoryService struct {
+	deps *Deps /* service 层共享依赖 */
+}
+
+// MemoryService 编排长期记忆领域组件。
+type MemoryService struct {
+	candidate  *memory.CandidateService // 候选生命周期管理
+	retriever  *memory.Retriever        // 正式记忆检索
+	memService *memory.Service          // 正式记忆增删改查
+}
+
+type CreateCandidateResult struct {
+	Candidate data.MemoryCandidate `json:"candidate"` /* 新建候选 */
+}
+type ListCandidatesResult struct {
+	Items []data.MemoryCandidate `json:"items"` /* 候选列表 */
+}
+type ConfirmCandidateResult struct {
+	Memory data.Memory `json:"memory"` /* 确认后生成的正式记忆 */
+}
+type ListMemoriesResult struct {
+	Items []data.Memory `json:"items"` /* 正式记忆列表 */
+}
+type UpdateMemoryResult struct {
+	Memory data.Memory `json:"memory"` /* 更新后的正式记忆 */
+}
 
 // ChatError 是 service 层返回给 handler 的业务错误.
 // handler 拿到后直接用 StatusCode 做 HTTP 响应码, 用 Code 做业务错误码.
@@ -51,31 +124,6 @@ type ChatError struct {
 	TraceID    string // 关联的 trace ID, 写入响应体供排查
 }
 
-// Error 方法让 ChatError 满足 Go 的 error 接口.
-// error 接口只有一个方法 Error() string, 任何类型只要实现了这个方法就能当 error 用
-func (e *ChatError) Error() string { return e.Code }
-
-// NewChatError 创建一个 ChatError, 用于 handler 直接映射 HTTP 响应.
-// 返回 *ChatError 是指针, 避免结构体拷贝
-func NewChatError(statusCode int, code, traceID string) *ChatError {
-	// &ChatError{...} 取结构体字面量的指针, 返回堆上的地址
-	return &ChatError{StatusCode: statusCode, Code: code, TraceID: traceID}
-}
-
-// FromChatError 尝试把 error 转成 *ChatError, 不是就返回 nil.
-// handler 用这个判断是不是业务错误(需要带 code 响应), 还是内部错误(统一 500).
-func FromChatError(err error) *ChatError {
-	// 声明一个 *ChatError 类型的变量 ce, 初始值为 nil
-	var ce *ChatError
-	// errors.As 是 Go 标准库 errors 包里的函数
-	// 它检查 err 链上有没有 *ChatError 类型, 有就塞进 ce 并返回 true
-	// 举个例子, err 是 fmt.Errorf("...: %w", chatErr) 包装过的, errors.As 能剥开包装找到里面的 *ChatError
-	if errors.As(err, &ce) {
-		return ce
-	}
-	return nil
-}
-
 // ChatEventType 标识 SSE 事件的类型, handler 根据它决定写哪个 SSE event 名.
 // 用 int 类型而不是 string, 因为 int 比较比 string 快
 type ChatEventType int
@@ -84,10 +132,10 @@ type ChatEventType int
 // iota 是 Go 的常量计数器, 从 0 开始, 每出现一行 const 自动 +1
 // iota + 1 让值从 1 开始(0 在 Go 里常表示"零值", 不方便区分"未设置"和"第一个")
 const (
-	ChatEventMessage ChatEventType = iota + 1 // 消息内容片段, 值为 1
-	ChatEventUsage                           // token 用量和性能指标, 值为 2
-	ChatEventDone                            // 正常结束, 值为 3
-	ChatEventReplayDone                      // 幂等重放结束(区别于正常 done), 值为 4
+	ChatEventMessage    ChatEventType = iota + 1 // 消息内容片段, 值为 1
+	ChatEventUsage                               // token 用量和性能指标, 值为 2
+	ChatEventDone                                // 正常结束, 值为 3
+	ChatEventReplayDone                          // 幂等重放结束(区别于正常 done), 值为 4
 )
 
 // ChatEvent 是 service 通过 channel 发给 handler 的事件.
@@ -106,12 +154,12 @@ type ChatEvent struct {
 type UsageData struct {
 	PromptTokens     int   // 输入 token 数
 	CompletionTokens int   // 输出 token 数
-	CacheHitTokens    int   // 缓存命中的 token 数
-	CacheMissTokens   int   // 缓存未命中的 token 数
-	ReasoningTokens   int   // 推理 token 数(思维链)
-	TotalTokens       int   // 总 token 数
-	FirstTokenMs      int64 // 首 token 耗时(毫秒)
-	TotalDurationMs   int64 // 总耗时(毫秒)
+	CacheHitTokens   int   // 缓存命中的 token 数
+	CacheMissTokens  int   // 缓存未命中的 token 数
+	ReasoningTokens  int   // 推理 token 数(思维链)
+	TotalTokens      int   // 总 token 数
+	FirstTokenMs     int64 // 首 token 耗时(毫秒)
+	TotalDurationMs  int64 // 总耗时(毫秒)
 }
 
 // chatParams 是调 ChatService.Chat 时传进来的请求参数.
@@ -153,17 +201,4 @@ type Deps struct {
 	idm  *identity.Manager
 	mem  *memory.Store
 	llm  llm.Provider
-}
-
-// NewDeps 创建 service 层的依赖集合.
-// 由 handler 层的 NewDeps 调, 把底层依赖传进来.
-// 返回 *Deps 是指针, 这样所有用到 Deps 的地方共用同一份实例
-func NewDeps(cfg *config.Config, repo data.Repository, idm *identity.Manager, mem *memory.Store, llm llm.Provider) *Deps {
-	return &Deps{
-		cfg:  cfg,  // 配置
-		repo: repo, // 数据仓库接口
-		idm:  idm,  // 身份管理器
-		mem:  mem,  // 记忆存储
-		llm:  llm,  // LLM 客户端
-	}
 }

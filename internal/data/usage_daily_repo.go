@@ -7,7 +7,7 @@
 //
 // 设计要点:
 //   - 聚合粒度: date + device_id + user_id + provider + model + operation.
-//   - 幂等: 用 SQLite 的 INSERT ... ON CONFLICT DO UPDATE 语义(UPSERT).
+//   - 并发累加: 使用 GORM 的 OnConflict 表达聚合更新，不在 Go 文件中维护完整 SQL 语句.
 //   - 聚合任务失败不能丢失原始记录, 修复后可以按日期重新计算.
 package data
 
@@ -17,33 +17,21 @@ import (
 
 	"github.com/swallow-sun/swallow-go/pkg/logger"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // UpsertModelUsageDaily 把一条原始 model_usages 记录聚合到日表.
 // 按 date + device_id + user_id + provider + model + operation 聚合,
 // 存在就累加 request_count 和 token 数, 不存在就插入新行.
-// 方案 15.7 节: 原始用量写入成功后通过幂等聚合任务更新日表.
+// 方案 15.7 节: 原始用量写入成功后更新日表；原始记录仍是重新聚合的事实来源.
+//
+// TableName 指定 model_usage_daily 表名。
+func (ormModelUsageDaily) TableName() string { return "model_usage_daily" }
+
 func (r *sqliteRepo) UpsertModelUsageDaily(ctx context.Context, usage ModelUsage) error {
 	// 从 occurred_at 提取日期部分(YYYY-MM-DD), 转成 UTC 避免时区问题
 	dateStr := usage.OccurredAt.UTC().Format("2006-01-02")
-
-	// 用 INSERT ... ON CONFLICT DO UPDATE 实现 UPSERT.
-	// 唯一索引 idx_usage_daily_unique 覆盖 date + COALESCE(device_id, '') + user_id + provider + model + operation.
-	// 冲突时累加 request_count, failed_count 和 token 数.
-	// COALESCE(device_id, '') 把 NULL 转成空字符串, 保证唯一索引能匹配.
-	sql := `
-		INSERT INTO model_usage_daily (date, device_id, user_id, provider, model, operation,
-			request_count, failed_count, input_tokens, output_tokens, cached_input_tokens,
-			estimated_cost_micros, currency)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(date, COALESCE(device_id, ''), user_id, provider, model, operation)
-		DO UPDATE SET
-			request_count = model_usage_daily.request_count + ?,
-			failed_count = model_usage_daily.failed_count + ?,
-			input_tokens = model_usage_daily.input_tokens + ?,
-			output_tokens = model_usage_daily.output_tokens + ?,
-			cached_input_tokens = model_usage_daily.cached_input_tokens + ?
-	`
 
 	// 判断这次调用是否失败, 失败的话 failed_count +1
 	failedCount := int64(0)
@@ -56,28 +44,29 @@ func (r *sqliteRepo) UpsertModelUsageDaily(ctx context.Context, usage ModelUsage
 	outputTokens := ptrToIntOrZero(usage.OutputTokens)
 	cachedTokens := ptrToIntOrZero(usage.CachedInputTokens)
 
-	// 用指针类型传值, GORM 会自动处理 NULL
-	result := r.db.WithContext(ctx).Exec(sql,
-		dateStr,                   // date
-		stringToPtr(usage.DeviceID), // device_id (NULL if empty)
-		int64ToPtr(usage.UserID),    // user_id (NULL if 0)
-		usage.Provider,            // provider
-		usage.Model,               // model
-		usage.Operation,           // operation
-		1,                         // request_count (新插入时 +1)
-		failedCount,                // failed_count
-		inputTokens,                // input_tokens
-		outputTokens,               // output_tokens
-		cachedTokens,               // cached_input_tokens
-		usage.EstimatedCostMicros,  // estimated_cost_micros
-		stringToPtr(usage.Currency), // currency
-		// ON CONFLICT DO UPDATE 的累加值
-		1,           // request_count 累加
-		failedCount,  // failed_count 累加
-		inputTokens,  // input_tokens 累加
-		outputTokens, // output_tokens 累加
-		cachedTokens, // cached_input_tokens 累加
-	)
+	row := ormModelUsageDaily{
+		Date: dateStr, DeviceID: usage.DeviceID, UserID: usage.UserID,
+		Provider: usage.Provider, Model: usage.Model, Operation: usage.Operation,
+		RequestCount: 1, FailedCount: failedCount, InputTokens: inputTokens,
+		OutputTokens: outputTokens, CachedInputTokens: cachedTokens,
+		EstimatedCostMicros: usage.EstimatedCostMicros,
+		Currency:            stringToPtr(usage.Currency),
+	}
+	result := r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "date"}, {Name: "device_id"}, {Name: "user_id"},
+			{Name: "provider"}, {Name: "model"}, {Name: "operation"},
+		},
+		DoUpdates: clause.Assignments(map[string]any{
+			"request_count":         gorm.Expr("model_usage_daily.request_count + excluded.request_count"),
+			"failed_count":          gorm.Expr("model_usage_daily.failed_count + excluded.failed_count"),
+			"input_tokens":          gorm.Expr("model_usage_daily.input_tokens + excluded.input_tokens"),
+			"output_tokens":         gorm.Expr("model_usage_daily.output_tokens + excluded.output_tokens"),
+			"cached_input_tokens":   gorm.Expr("model_usage_daily.cached_input_tokens + excluded.cached_input_tokens"),
+			"estimated_cost_micros": gorm.Expr("CASE WHEN excluded.estimated_cost_micros IS NULL THEN model_usage_daily.estimated_cost_micros ELSE COALESCE(model_usage_daily.estimated_cost_micros, 0) + excluded.estimated_cost_micros END"),
+			"currency":              gorm.Expr("COALESCE(model_usage_daily.currency, excluded.currency)"),
+		}),
+	}).Create(&row)
 
 	if result.Error != nil {
 		logger.Error("model_usage_daily upsert failed",
@@ -138,19 +127,19 @@ func (r *sqliteRepo) GetDailyUsage(ctx context.Context, dateFrom, dateTo string)
 func modelUsageDailyFromORM(model ormModelUsageDaily) ModelUsageDaily {
 	return ModelUsageDaily{
 		ID:                  model.ID,
-		Date:               model.Date,
-		DeviceID:           ptrToString(model.DeviceID),
-		UserID:             ptrToInt64(model.UserID),
-		Provider:           model.Provider,
-		Model:              model.Model,
-		Operation:          model.Operation,
-		RequestCount:       model.RequestCount,
-		FailedCount:        model.FailedCount,
-		InputTokens:        model.InputTokens,
-		OutputTokens:       model.OutputTokens,
-		CachedInputTokens:  model.CachedInputTokens,
+		Date:                model.Date,
+		DeviceID:            model.DeviceID,
+		UserID:              model.UserID,
+		Provider:            model.Provider,
+		Model:               model.Model,
+		Operation:           model.Operation,
+		RequestCount:        model.RequestCount,
+		FailedCount:         model.FailedCount,
+		InputTokens:         model.InputTokens,
+		OutputTokens:        model.OutputTokens,
+		CachedInputTokens:   model.CachedInputTokens,
 		EstimatedCostMicros: model.EstimatedCostMicros,
-		Currency:           ptrToString(model.Currency),
+		Currency:            ptrToString(model.Currency),
 	}
 }
 

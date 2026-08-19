@@ -27,17 +27,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// DefaultSearchLimit 是检索记忆时的默认最大返回数.
-// 方案 16.11.2 节: "将少量相关记忆作为不可信参考数据注入模型".
-// 不返回太多, 避免记忆内容撑爆模型上下文.
-const DefaultSearchLimit = 10
-
-// Retriever 负责检索正式记忆.
-// 持有 repo(data.Repository), 通过 SearchMemories 查数据库.
-type Retriever struct {
-	repo data.Repository
-}
-
 // NewRetriever 创建一个 Retriever.
 func NewRetriever(repo data.Repository) *Retriever {
 	return &Retriever{repo: repo}
@@ -85,13 +74,13 @@ func (s *Retriever) Search(
 	if err != nil {
 		// 查询失败也要发埋点, 方便看板统计错误率
 		telemetry.Emit(ctx, telemetry.EventMemoryQuery, map[string]any{
-			"user_id":                userID,
-			"keywords":               keywords,
-			"limit":                  limit,
-			"trace_id":               traceID,
-			telemetry.FieldStatus:    telemetry.StatusError,
+			"user_id":                 userID,
+			"keywords":                keywords,
+			"limit":                   limit,
+			"trace_id":                traceID,
+			telemetry.FieldStatus:     telemetry.StatusError,
 			telemetry.FieldDurationMS: elapsed.Milliseconds(),
-			"error":                  err.Error(),
+			"error":                   err.Error(),
 		})
 
 		// Prometheus 指标: 记忆查询失败
@@ -103,12 +92,12 @@ func (s *Retriever) Search(
 	// 查询成功, 发埋点
 	// 方案 16.11.4 节: "memory_query 事件包含限制数, 返回数, 状态和耗时"
 	telemetry.Emit(ctx, telemetry.EventMemoryQuery, map[string]any{
-		"user_id":                userID,
-		"keywords":               keywords,
-		"limit":                  limit,
-		"rows_returned":          len(rows),
-		"trace_id":               traceID,
-		telemetry.FieldStatus:    telemetry.StatusOK,
+		"user_id":                 userID,
+		"keywords":                keywords,
+		"limit":                   limit,
+		"rows_returned":           len(rows),
+		"trace_id":                traceID,
+		telemetry.FieldStatus:     telemetry.StatusOK,
 		telemetry.FieldDurationMS: elapsed.Milliseconds(),
 	})
 

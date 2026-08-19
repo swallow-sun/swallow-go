@@ -25,18 +25,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// spanKey 是 Span 在 context.Context 中使用的私有键类型,防止外部包直接访问.
-type spanKey struct{}
-
-// SpanSink 是 Span 写库的目标接口.
-// 由 data 层实现(把 Span 写进 SQLite spans 表).
-// trace 包不直接依赖 data 包,通过接口传进来,避免循环依赖.
-type SpanSink interface {
-	// WriteSpan 把一个完整的 Span 记录写进数据库.
-	// ctx 控制超时,span 是完整的 Span 数据(已 End).
-	WriteSpan(ctx context.Context, span Span) error
-}
-
 // globalSink 是当前进程唯一的 Span 写库目标.
 // nil 表示只打日志不写库.
 var globalSink SpanSink
@@ -44,31 +32,6 @@ var globalSink SpanSink
 // SetSpanSink 设置 Span 写库目标,一般在程序启动时调一次.
 func SetSpanSink(s SpanSink) {
 	globalSink = s
-}
-
-// Span 表示一个处理步骤的追踪记录.
-// 一个 Span 对应一次请求经过的一个组件(handler,service,model_provider).
-type Span struct {
-	// ID 是这个 Span 的唯一标识(UUID),同时是 spans 表的主键
-	ID string
-	// TraceID 是链路追踪 ID,同一次请求的所有 Span 共享同一个 trace_id
-	TraceID string
-	// ParentSpanID 是父 Span 的 ID,根 Span 为空字符串
-	ParentSpanID string
-	// Component 是组件名:handler / chat_service / model_provider
-	Component string
-	// Operation 是操作名:POST /api/chat,stream_loop,llm.stream 等
-	Operation string
-	// Status 是状态:ok / error / cancelled
-	Status string
-	// DurationMs 是耗时(毫秒),0 表示步骤极快
-	DurationMs int64
-	// StartedAt 是开始时间
-	StartedAt time.Time
-	// FinishedAt 是结束时间,零值表示未结束
-	FinishedAt time.Time
-	// Attributes 是附加属性(model,error_code 等),写库时转成 JSON
-	Attributes map[string]any
 }
 
 // StartSpan 创建一个 Span 并塞进 context.
@@ -93,13 +56,13 @@ func StartSpan(ctx context.Context, component, operation string) (context.Contex
 
 	// 构造一个新 Span
 	span := &Span{
-		ID:           uuid.NewString(), // 生成新的 Span ID(UUID)
-		TraceID:      traceID,           // 从 context 里拿的 trace ID
-		ParentSpanID: parentID,          // 父 Span ID,根 Span 为空
-		Component:    component,         // 组件名
-		Operation:    operation,         // 操作名
-		Status:       "ok",              // 默认成功,出错了改成 error 或 cancelled
-		StartedAt:    time.Now(),        // 记录开始时间
+		ID:           uuid.NewString(),     // 生成新的 Span ID(UUID)
+		TraceID:      traceID,              // 从 context 里拿的 trace ID
+		ParentSpanID: parentID,             // 父 Span ID,根 Span 为空
+		Component:    component,            // 组件名
+		Operation:    operation,            // 操作名
+		Status:       "ok",                 // 默认成功,出错了改成 error 或 cancelled
+		StartedAt:    time.Now(),           // 记录开始时间
 		Attributes:   make(map[string]any), // 附加属性,初始空 map
 	}
 

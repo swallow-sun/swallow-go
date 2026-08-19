@@ -21,6 +21,9 @@ import (
 //
 // 参数 ctx 控制超时,span 是完整的 Span 数据(已 End).
 // 写入失败返回 error,调用方应记 ERROR 但不阻断主流程(Span 是观测数据,不是业务数据).
+// TableName 指定 spans 表名，不依赖 GORM 自动命名规则。
+func (ormSpan) TableName() string { return "spans" }
+
 func (r *sqliteRepo) InsertSpan(ctx context.Context, span Span) error {
 	// 业务对象转 ORM 模型
 	model := spanToORM(span)
@@ -31,7 +34,8 @@ func (r *sqliteRepo) InsertSpan(ctx context.Context, span Span) error {
 		logger.Error("spans insert failed",
 			zap.String("span_id", model.ID),
 			zap.String("trace_id", model.TraceID),
-			zap.Any("row", model),
+			zap.String("component", model.Component),
+			zap.String("operation", model.Operation),
 			zap.Error(err),
 		)
 		return fmt.Errorf("insert span: %w", err)
@@ -39,7 +43,8 @@ func (r *sqliteRepo) InsertSpan(ctx context.Context, span Span) error {
 
 	// 写库成功后打 Debug 日志
 	logger.Debug("spans insert succeeded",
-		zap.Any("row", model),
+		zap.String("span_id", model.ID),
+		zap.String("trace_id", model.TraceID),
 	)
 	return nil
 }

@@ -30,13 +30,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// CandidateService 负责记忆候选的创建, 查询, 确认和拒绝.
-// 持有 repo(data.Repository)调数据层, policy(*Policy)产生候选.
-type CandidateService struct {
-	repo   data.Repository
-	policy *Policy
-}
-
 // NewCandidateService 创建一个 CandidateService.
 // repo 是数据访问层接口, policy 是候选产生规则引擎.
 func NewCandidateService(repo data.Repository, policy *Policy) *CandidateService {
@@ -162,10 +155,10 @@ func (s *CandidateService) ConfirmCandidate(ctx context.Context, id, userID int6
 	// 发埋点: 记录记忆确认事件
 	// 方案 16.11.3 节: "events 写入 memory_confirmed"
 	telemetry.Emit(ctx, telemetry.EventMemoryConfirmed, map[string]any{
-		"candidate_id":         id,
-		"memory_id":            memory.ID,
-		"user_id":              userID,
-		telemetry.FieldStatus:  telemetry.StatusOK,
+		"candidate_id":            id,
+		"memory_id":               memory.ID,
+		"user_id":                 userID,
+		telemetry.FieldStatus:     telemetry.StatusOK,
 		telemetry.FieldDurationMS: elapsed.Milliseconds(),
 	})
 
@@ -184,20 +177,8 @@ func (s *CandidateService) ConfirmCandidate(ctx context.Context, id, userID int6
 //
 // 方案 16.11.4 节: "用户拒绝候选后, 不因重新登录再次弹出同一候选".
 func (s *CandidateService) RejectCandidate(ctx context.Context, id, userID int64) error {
-	// 先查出候选, 做用户归属校验
-	// RejectMemoryCandidate 在 repo 层不做用户校验, 这里补上
-	candidate, err := s.repo.GetMemoryCandidate(ctx, id)
-	if err != nil {
-		return fmt.Errorf("get candidate for reject: %w", err)
-	}
-
-	// 安全校验: 候选必须属于这个用户
-	if candidate.UserID != userID {
-		return fmt.Errorf("candidate %d does not belong to user %d", id, userID)
-	}
-
-	// 调 repo 改状态
-	if err := s.repo.RejectMemoryCandidate(ctx, id); err != nil {
+	// Repository 在同一条 UPDATE 中同时校验用户归属和 pending 状态，避免先查后改的竞态窗口。
+	if err := s.repo.RejectMemoryCandidate(ctx, id, userID); err != nil {
 		return fmt.Errorf("reject candidate: %w", err)
 	}
 

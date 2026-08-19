@@ -95,6 +95,11 @@ CREATE INDEX idx_memories_user_type
 CREATE INDEX idx_memories_user_keywords
     ON memories(user_id, status);
 
+-- 一个候选最多生成一条正式记忆；手动创建的 NULL candidate_id 不受影响。
+CREATE UNIQUE INDEX idx_memories_candidate_unique
+    ON memories(candidate_id)
+    WHERE candidate_id IS NOT NULL;
+
 -- ============================================================
 -- 3. memory_versions: 记忆编辑历史表
 -- ============================================================
@@ -116,8 +121,7 @@ CREATE TABLE memory_versions (
     content     TEXT NOT NULL,                  -- 该版本的内容
     keywords    TEXT NOT NULL DEFAULT '',        -- 该版本的关键词
     edited_by   TEXT NOT NULL DEFAULT 'user',   -- 编辑者: user/system
-    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP -- 不使用外键，由 Repository 事务保证关联一致性
 );
 
 -- 按记忆查版本历史
@@ -143,8 +147,7 @@ CREATE TABLE memory_tombstones (
     memory_id    INTEGER NOT NULL,              -- 被删除的记忆 ID
     user_id      INTEGER NOT NULL,              -- 哪个用户删的
     sync_version INTEGER NOT NULL DEFAULT 0,     -- 删除时的同步版本号
-    deleted_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+    deleted_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP -- 不使用外键，由 Repository 事务保证关联一致性
 );
 
 -- 按用户查 tombstone: 同步时检查哪些记忆已被删除

@@ -26,6 +26,20 @@ type Deps struct {
 	memory *service.MemoryService
 }
 
+type createCandidateReq struct {
+	SessionID  string `json:"session_id"`
+	TraceID    string `json:"trace_id"`
+	Content    string `json:"content"`
+	MemoryType string `json:"memory_type"`
+	Reason     string `json:"reason"`
+	UsageHint  string `json:"usage_hint"`
+}
+
+type updateMemoryReq struct {
+	Content  string `json:"content"`
+	Keywords string `json:"keywords"`
+}
+
 // createSessionReq 是 POST /api/session 的请求体.
 // 客户端传 {"user_name": "owner"}, 解析到这个结构体里.
 // 反引号 `json:"user_name"` 是 Go 的 struct tag,
@@ -48,9 +62,9 @@ type createSessionResp struct {
 // 客户端传 {"session_id": "xxx", "message": "你好"}, 解析到这个结构体里.
 // 除了 session_id 和 message, 还支持 client_message_id 用于幂等去重.
 type chatReq struct {
-	SessionID        string `json:"session_id"`         // 会话 ID, 告诉服务端这段消息属于哪段对话
-	ClientMessageID string `json:"client_message_id"`  // 客户端生成的稳定消息 ID, 网络重试时必须保持不变
-	Message         string `json:"message"`            // 用户说的话
+	SessionID       string `json:"session_id"`        // 会话 ID, 告诉服务端这段消息属于哪段对话
+	ClientMessageID string `json:"client_message_id"` // 客户端生成的稳定消息 ID, 网络重试时必须保持不变
+	Message         string `json:"message"`           // 用户说的话
 }
 
 // historyItem 是一条对话记录, 对应数据库 dialogues 表里的一行.

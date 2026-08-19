@@ -10,9 +10,13 @@ package handler
 
 import (
 	"context"
+	"crypto/subtle"
+	"errors"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/swallow-sun/swallow-go/biz/service"
 	"github.com/swallow-sun/swallow-go/pkg/logger"
 	"go.uber.org/zap"
 )
@@ -20,6 +24,9 @@ import (
 // GetModelUsage GET /api/v1/dashboard/model-usage?from=YYYY-MM-DD&to=YYYY-MM-DD
 // 客户端在 URL 里传 from 和 to 两个日期参数, 返回这个日期范围内的模型用量日聚合数据.
 func (d *Deps) GetModelUsage(ctx context.Context, c *app.RequestContext) {
+	if !d.authorizeOwner(c) {
+		return
+	}
 	// 从 URL 查询参数里取 from 和 to, 比如 ?from=2026-08-01&to=2026-08-18
 	// c.Query 返回 []byte, 用 string() 转成 Go 字符串
 	dateFrom := string(c.Query("from"))
@@ -37,6 +44,11 @@ func (d *Deps) GetModelUsage(ctx context.Context, c *app.RequestContext) {
 	// result 里包含 From, To 和 Items(日聚合记录列表)
 	result, err := d.dashboard.GetModelUsage(ctx, dateFrom, dateTo)
 	if err != nil {
+		var validationErr *service.DashboardValidationError
+		if errors.As(err, &validationErr) {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": validationErr.Error()})
+			return
+		}
 		// 打日志, 记录是哪个日期范围查失败了, 方便排查
 		logger.Error("query model usage failed",
 			zap.String("from", dateFrom),
@@ -51,4 +63,22 @@ func (d *Deps) GetModelUsage(ctx context.Context, c *app.RequestContext) {
 	// 返回 HTTP 200 + JSON 响应体.
 	// result 已经是带 json tag 的结构体, 直接序列化发给客户端.
 	c.JSON(consts.StatusOK, result)
+}
+
+// authorizeOwner 校验 owner Bearer Token，供看板和长期记忆等敏感接口复用。
+func (d *Deps) authorizeOwner(c *app.RequestContext) bool {
+	ownerToken := d.dashboard.OwnerToken()
+	if ownerToken == "" {
+		logger.Error("owner token is not configured")
+		c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "owner authentication is not configured"})
+		return false
+	}
+	provided := strings.TrimSpace(string(c.GetHeader("Authorization")))
+	expected := "Bearer " + ownerToken
+	if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+		logger.Warn("owner authentication failed")
+		c.JSON(consts.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return false
+	}
+	return true
 }

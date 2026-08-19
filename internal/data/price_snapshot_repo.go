@@ -23,6 +23,9 @@ import (
 // GetPriceSnapshot 查询指定供应商+模型在指定时间点的有效价格快照.
 // 按 effective_from <= at 的条件找最新一条, 就是那个时间点的有效价格.
 // 找不到返回 ModelPriceSnapshot 零值和 ErrPriceNotFound, 调用方决定是跳过费用估算还是报错.
+// TableName 指定 model_price_snapshots 表名。
+func (ormModelPriceSnapshot) TableName() string { return "model_price_snapshots" }
+
 func (r *sqliteRepo) GetPriceSnapshot(ctx context.Context, provider, model string, at time.Time) (ModelPriceSnapshot, error) {
 	var orm ormModelPriceSnapshot
 
@@ -58,9 +61,11 @@ func (r *sqliteRepo) GetPriceSnapshot(ctx context.Context, provider, model strin
 		return ModelPriceSnapshot{}, err
 	}
 
-	// 打 Debug 日志, 记录查到的价格快照
+	// 只记录价格版本标识，不输出完整价格记录。
 	logger.Debug("price snapshot found",
-		zap.Any("row", orm),
+		zap.Int64("price_snapshot_id", orm.ID),
+		zap.String("provider", orm.Provider),
+		zap.String("model", orm.Model),
 	)
 
 	return priceSnapshotFromORM(orm), nil

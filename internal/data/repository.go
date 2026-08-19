@@ -32,14 +32,6 @@ func (a EventSinkAdapter) WriteEvent(ctx context.Context, eventType, traceID, da
 	return a.Repo.InsertEvent(ctx, eventType, nil, data, durationMs, success, traceID)
 }
 
-// SpanSinkAdapter 把 Repository 适配成 trace.SpanSink 接口.
-// trace 包只认 SpanSink 接口,不直接依赖 Repository;
-// 这个适配器把 trace 传来的 Span 转成 Repository.InsertSpan 能接受的格式.
-type SpanSinkAdapter struct {
-	// Repo 是持有的 Repository 实例,所有 Span 最终都通过它存进数据库
-	Repo Repository
-}
-
 // WriteSpan 实现 trace.SpanSink 接口.
 // 把 trace.Span 转成 data.Span,再调 Repository.InsertSpan 写库.
 func (a SpanSinkAdapter) WriteSpan(ctx context.Context, span trace.Span) error {

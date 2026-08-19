@@ -13,8 +13,9 @@
 // handler 只做 HTTP 解析和 JSON 序列化, 业务逻辑在 service 层.
 //
 // 用户 ID 来源:
-//   当前阶段没有认证中间件, 暂时从 URL query 参数 user_id 取.
-//   后续阶段加认证后, userID 从 JWT/Session 里取.
+//
+//	当前阶段没有认证中间件, 暂时从 URL query 参数 user_id 取.
+//	后续阶段加认证后, userID 从 JWT/Session 里取.
 package handler
 
 import (
@@ -27,26 +28,13 @@ import (
 	"go.uber.org/zap"
 )
 
-// createCandidateReq 是 POST /api/v1/memory-candidates 的请求体.
-type createCandidateReq struct {
-	SessionID  string `json:"session_id"`  // 来源会话 ID
-	TraceID    string `json:"trace_id"`    // 来源对话的 trace ID, 可选
-	Content    string `json:"content"`     // 候选记忆内容
-	MemoryType string `json:"memory_type"` // 记忆类型: preference/fact/instruction/persona
-	Reason     string `json:"reason"`      // 为什么建议保存, 可选
-	UsageHint  string `json:"usage_hint"`  // 保存后可能如何使用, 可选
-}
-
-// updateMemoryReq 是 PATCH /api/v1/memories/{id} 的请求体.
-type updateMemoryReq struct {
-	Content  string `json:"content"`  // 编辑后的记忆内容
-	Keywords string `json:"keywords"` // 编辑后的关键词
-}
-
 // CreateCandidate POST /api/v1/memory-candidates
 // 手动提交一条记忆候选.
 // 需要在 URL query 里带 user_id, 在请求体里带候选内容.
 func (d *Deps) CreateCandidate(ctx context.Context, c *app.RequestContext) {
+	if !d.authorizeOwner(c) {
+		return
+	}
 	// 从 URL query 取 user_id
 	// 当前阶段没有认证中间件, 暂时从 query 参数取
 	userID, ok := parseUserID(c)
@@ -83,6 +71,9 @@ func (d *Deps) CreateCandidate(ctx context.Context, c *app.RequestContext) {
 // 按用户 ID 和状态查候选列表.
 // status 为空时查所有状态.
 func (d *Deps) ListCandidates(ctx context.Context, c *app.RequestContext) {
+	if !d.authorizeOwner(c) {
+		return
+	}
 	userID, ok := parseUserID(c)
 	if !ok {
 		c.JSON(consts.StatusBadRequest, map[string]string{"error": "valid user_id is required"})
@@ -105,6 +96,9 @@ func (d *Deps) ListCandidates(ctx context.Context, c *app.RequestContext) {
 // ConfirmCandidate POST /api/v1/memory-candidates/{id}/confirm
 // 确认候选, 写入正式记忆.
 func (d *Deps) ConfirmCandidate(ctx context.Context, c *app.RequestContext) {
+	if !d.authorizeOwner(c) {
+		return
+	}
 	userID, ok := parseUserID(c)
 	if !ok {
 		c.JSON(consts.StatusBadRequest, map[string]string{"error": "valid user_id is required"})
@@ -136,6 +130,9 @@ func (d *Deps) ConfirmCandidate(ctx context.Context, c *app.RequestContext) {
 // RejectCandidate POST /api/v1/memory-candidates/{id}/reject
 // 拒绝候选.
 func (d *Deps) RejectCandidate(ctx context.Context, c *app.RequestContext) {
+	if !d.authorizeOwner(c) {
+		return
+	}
 	userID, ok := parseUserID(c)
 	if !ok {
 		c.JSON(consts.StatusBadRequest, map[string]string{"error": "valid user_id is required"})
@@ -164,6 +161,9 @@ func (d *Deps) RejectCandidate(ctx context.Context, c *app.RequestContext) {
 // ListMemories GET /api/v1/memories?user_id=1
 // 按用户 ID 查正式记忆列表.
 func (d *Deps) ListMemories(ctx context.Context, c *app.RequestContext) {
+	if !d.authorizeOwner(c) {
+		return
+	}
 	userID, ok := parseUserID(c)
 	if !ok {
 		c.JSON(consts.StatusBadRequest, map[string]string{"error": "valid user_id is required"})
@@ -183,6 +183,9 @@ func (d *Deps) ListMemories(ctx context.Context, c *app.RequestContext) {
 // UpdateMemory PATCH /api/v1/memories/{id}
 // 编辑记忆内容 + 关键词.
 func (d *Deps) UpdateMemory(ctx context.Context, c *app.RequestContext) {
+	if !d.authorizeOwner(c) {
+		return
+	}
 	userID, ok := parseUserID(c)
 	if !ok {
 		c.JSON(consts.StatusBadRequest, map[string]string{"error": "valid user_id is required"})
@@ -223,6 +226,9 @@ func (d *Deps) UpdateMemory(ctx context.Context, c *app.RequestContext) {
 // DeleteMemory DELETE /api/v1/memories/{id}
 // 软删记忆.
 func (d *Deps) DeleteMemory(ctx context.Context, c *app.RequestContext) {
+	if !d.authorizeOwner(c) {
+		return
+	}
 	userID, ok := parseUserID(c)
 	if !ok {
 		c.JSON(consts.StatusBadRequest, map[string]string{"error": "valid user_id is required"})

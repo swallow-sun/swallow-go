@@ -17,6 +17,9 @@ import (
 	"gorm.io/gorm"
 )
 
+// SpanSinkAdapter 把 Repository 适配为 trace.SpanSink。
+type SpanSinkAdapter struct{ Repo Repository }
+
 const (
 	// MigrationStatusRunning 表示迁移已经登记,正在执行.
 	// 迁移开始时先插一条 running 记录,执行完再更新成 completed 或 failed.
@@ -43,11 +46,11 @@ const (
 
 	// 下面是 model_usages 表的操作类型和状态常量.
 	// operation 字段区分这次模型调用是干什么的:聊天,嵌入,视觉,语音识别还是语音合成.
-	ModelOperationChat     = "chat"      // 文字对话
+	ModelOperationChat      = "chat"      // 文字对话
 	ModelOperationEmbedding = "embedding" // 向量嵌入
-	ModelOperationVision   = "vision"    // 视觉理解
-	ModelOperationASR      = "asr"       // 语音识别(Automatic Speech Recognition)
-	ModelOperationTTS      = "tts"       // 语音合成(Text To Speech)
+	ModelOperationVision    = "vision"    // 视觉理解
+	ModelOperationASR       = "asr"       // 语音识别(Automatic Speech Recognition)
+	ModelOperationTTS       = "tts"       // 语音合成(Text To Speech)
 
 	// status 字段标记这次模型调用成功还是失败.
 	// 和 ChatRequest 的状态不同,model_usages 只记最终结果,不记中间状态.
@@ -165,7 +168,7 @@ type Repository interface {
 	// 返回新建的 Memory 记录.
 	ConfirmMemoryCandidate(ctx context.Context, id int64, userID int64) (Memory, error)
 	// RejectMemoryCandidate 把候选状态从 pending 改成 rejected.
-	RejectMemoryCandidate(ctx context.Context, id int64) error
+	RejectMemoryCandidate(ctx context.Context, id int64, userID int64) error
 
 	// ===== 长期记忆: 正式记忆管理 =====
 
@@ -517,6 +520,7 @@ type ormEncryptedSecret struct {
 // NULL 和 0 的区别(方案铁律):
 //   - 0:供应商明确返回该项没有消耗.
 //   - nil(指针为 nil):供应商没返回,该模型不适用或当前无法可靠计算.
+//
 // 不能把 nil 自动变成 0,否则看板会错误显示"没有缓存 Token".
 type ModelUsage struct {
 	// ID 数据库自增主键
@@ -723,9 +727,6 @@ type ormSpan struct {
 	Attributes *string
 }
 
-// TableName 指定 spans 表名,不靠 GORM 的复数命名规则.
-func (ormSpan) TableName() string { return "spans" }
-
 // ModelPriceSnapshot 是一条模型价格快照(业务对象).
 // 方案 15.3 节: 价格会变化, 每条 model_usages 记录保存调用时使用的价格版本和估算结果.
 // 查询时按 provider + model + effective_from 找到调用时点的有效价格.
@@ -785,9 +786,6 @@ type ormModelPriceSnapshot struct {
 	CreatedAt time.Time `gorm:"not null;index:idx_price_snapshots_provider_model,priority:3:desc"`
 }
 
-// TableName 指定 model_price_snapshots 表名, 不靠 GORM 的复数命名规则.
-func (ormModelPriceSnapshot) TableName() string { return "model_price_snapshots" }
-
 // ModelUsageDaily 是一条日聚合记录(业务对象).
 // 方案 15.7 节: 大范围查询使用预聚合表, 不能每次扫描原始事件 JSON.
 // 原始用量写入成功后通过幂等聚合任务更新日表.
@@ -829,10 +827,10 @@ type ormModelUsageDaily struct {
 	ID int64 `gorm:"primaryKey;autoIncrement"`
 	// Date 聚合日期, 不允许空
 	Date string `gorm:"not null;index:idx_usage_daily_date;index:idx_usage_daily_provider_model,priority:3;index:idx_usage_daily_user,priority:2"`
-	// DeviceID 设备 ID, 允许 NULL
-	DeviceID *string
-	// UserID 用户 ID, 允许 NULL
-	UserID *int64 `gorm:"index:idx_usage_daily_user,priority:1"`
+	// DeviceID 设备 ID；空字符串表示当前未关联设备，避免 NULL 破坏唯一约束。
+	DeviceID string `gorm:"not null;default:''"`
+	// UserID 用户 ID；0 表示系统级用量，避免 NULL 破坏唯一约束。
+	UserID int64 `gorm:"not null;default:0;index:idx_usage_daily_user,priority:1"`
 	// Provider 供应商名称, 不允许空
 	Provider string `gorm:"not null;index:idx_usage_daily_provider_model,priority:1"`
 	// Model 模型名, 不允许空
@@ -854,9 +852,6 @@ type ormModelUsageDaily struct {
 	// Currency 币种, 允许 NULL
 	Currency *string
 }
-
-// TableName 指定 model_usage_daily 表名, 不靠 GORM 的复数命名规则.
-func (ormModelUsageDaily) TableName() string { return "model_usage_daily" }
 
 // 下面是各表的列名常量,SELECT 查询用显式列名,不用 SELECT *.
 // 好处:表加列不会意外查出不需要的数据;列顺序稳定;SQL 日志清晰.
@@ -1008,9 +1003,6 @@ type ormMemoryCandidate struct {
 	ResolvedAt *time.Time
 }
 
-// TableName 指定 memory_candidates 表名, 不靠 GORM 的复数命名规则.
-func (ormMemoryCandidate) TableName() string { return "memory_candidates" }
-
 // Memory 是一条正式记忆(业务对象).
 // 只有用户确认的候选才能写入 memories.
 // 检索时只查 status=active 的记录.
@@ -1065,9 +1057,6 @@ type ormMemory struct {
 	UpdatedAt time.Time `gorm:"not null;index:idx_memories_user,priority:3:desc"`
 }
 
-// TableName 指定 memories 表名, 不靠 GORM 的复数命名规则.
-func (ormMemory) TableName() string { return "memories" }
-
 // MemoryVersion 是一条记忆编辑版本记录(业务对象).
 // 用户编辑记忆内容时, 旧版本存到这里, 方便回溯修改历史.
 type MemoryVersion struct {
@@ -1105,9 +1094,6 @@ type ormMemoryVersion struct {
 	CreatedAt time.Time `gorm:"not null"`
 }
 
-// TableName 指定 memory_versions 表名, 不靠 GORM 的复数命名规则.
-func (ormMemoryVersion) TableName() string { return "memory_versions" }
-
 // MemoryTombstone 是一条记忆删除标记(业务对象).
 // 方案 16.11.4 节: 删除记忆后普通查询和缓存都不再返回它.
 // tombstone 防止已删除的记忆通过同步机制重新出现.
@@ -1137,6 +1123,3 @@ type ormMemoryTombstone struct {
 	// DeletedAt 删除时间, 不允许空
 	DeletedAt time.Time `gorm:"not null;index:idx_memory_tombstones_user,priority:2:desc"`
 }
-
-// TableName 指定 memory_tombstones 表名, 不靠 GORM 的复数命名规则.
-func (ormMemoryTombstone) TableName() string { return "memory_tombstones" }
