@@ -1,7 +1,7 @@
-﻿// types.go 放 telemetry 包的类型定义和常量.
+// types.go 放 telemetry 包的类型定义和常量.
 //
 // 做的事情:
-//  1. 定义事件类型常量:dialogue,memory_query,llm.call,llm.stream,llm.stream.complete.
+//  1. 定义对话、模型、记忆查询、记忆确认和记忆安全拒绝等事件类型常量.
 //  2. 定义通用字段名和状态值常量:status(ok/error/connected),ms(耗时毫秒).
 //  3. 定义 Event 结构体:一条埋点事件,包含类型,数据,trace ID,时间戳等.
 //  4. 定义 EventSink 接口:写库用的 Sink,由 data.EventSinkAdapter 实现,免得 telemetry 直接依赖 data 包.
@@ -47,9 +47,10 @@ const (
 	EventModelRequestFailed    = "model_request_failed"    // 模型调用失败事件: 模型调用出错
 	EventMessageCompleted      = "message_completed"       // 消息处理完成事件: 整轮对话结束
 
-	EventDialogue       = "dialogue"        // 对话事件: 用户发消息或助手回复(业务事件, 非 6 种之一)
-	EventMemoryQuery    = "memory_query"     // 记忆查询事件: 检索长期记忆(业务事件, 非 6 种之一)
-	EventMemoryConfirmed = "memory_confirmed" // 记忆确认事件: 候选确认后写正式记忆(方案 16.11.3 节)
+	EventDialogue               = "dialogue"                 // 对话事件: 用户发消息或助手回复(业务事件, 非 6 种之一)
+	EventMemoryQuery            = "memory_query"             // 记忆查询事件: 检索长期记忆(业务事件, 非 6 种之一)
+	EventMemoryConfirmed        = "memory_confirmed"         // 记忆确认事件: 候选确认后写正式记忆(方案 16.11.3 节)
+	EventMemoryCandidateBlocked = "memory_candidate_blocked" // 记忆候选安全拒绝事件: 只记录敏感类别, 不记录原文
 
 	// 下面是通用事件字段名,放在 Fields map 里的 key.
 	FieldStatus     = "status" // 状态字段:值是 ok/error/connected
@@ -59,6 +60,7 @@ const (
 	StatusOK        = "ok"        // 成功
 	StatusError     = "error"     // 失败
 	StatusConnected = "connected" // 连接成功(如 WebSocket 连上)
+	StatusRejected  = "rejected"  // 被业务安全策略拒绝
 )
 
 // Event 是一条等待记录的埋点事件.
@@ -76,7 +78,7 @@ const (
 type Event struct {
 	Name      string         // 事件类型名,如 "llm.call"
 	TraceID   string         // 链路追踪 ID,串联同一次请求的所有事件
-	Timestamp time.Time     // 事件发生时间
+	Timestamp time.Time      // 事件发生时间
 	Fields    map[string]any // 事件自定义字段,不同事件类型字段不同
 }
 
@@ -84,9 +86,10 @@ type Event struct {
 // 由 data.EventSinkAdapter 实现(把事件写进 SQLite events 表).
 //
 // 为什么用接口而不用直接调 data 包:
-//   telemetry 是底层包,data 是上层包.如果 telemetry 直接 import data,
-//   data 又 import telemetry(因为 data 要调 Emit 打埋点),就循环依赖了.
-//   用接口把方向反过来--data 实现 EventSink,telemetry 调接口,不依赖 data.
+//
+//	telemetry 是底层包,data 是上层包.如果 telemetry 直接 import data,
+//	data 又 import telemetry(因为 data 要调 Emit 打埋点),就循环依赖了.
+//	用接口把方向反过来--data 实现 EventSink,telemetry 调接口,不依赖 data.
 //
 // 实现必须用传进来的 Context 做阻塞操作,Context 取消后赶紧返回.
 // 返回 error 说明这次事件没写成功.
@@ -125,9 +128,9 @@ type recorder struct {
 	// emit 用读锁(RLock),init/shutdown/setSink 用写锁(Lock)
 	stateMu sync.RWMutex
 
-	eventChan    chan Event       // 事件 channel,业务代码往里写,消费者 goroutine 从里读
-	sink         EventSink         // 写库目标,nil 表示只打日志不写库
-	shutdownDone chan struct{}   // 关闭信号 channel,消费者处理完所有事件后 close 它
+	eventChan    chan Event    // 事件 channel,业务代码往里写,消费者 goroutine 从里读
+	sink         EventSink     // 写库目标,nil 表示只打日志不写库
+	shutdownDone chan struct{} // 关闭信号 channel,消费者处理完所有事件后 close 它
 
 	// 下面五个是原子计数器(atomic.Int64),多个 goroutine 同时读写不用加锁.
 	// .Add(n) 原子加 n,.Load() 原子读当前值,.Store(n) 原子设值

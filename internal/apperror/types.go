@@ -44,6 +44,8 @@ const (
 	CodeClientMessageIDTooLong = "client_message_id_too_long"
 	// CodeUserNameTooLong 表示用户名超过允许的最大长度.
 	CodeUserNameTooLong = "user_name_too_long"
+	// CodeSensitiveMemory 表示记忆候选包含禁止保存的敏感信息.
+	CodeSensitiveMemory = "sensitive_memory_prohibited"
 )
 
 // Error 是 handler 返回给客户端的统一应用错误.

@@ -53,12 +53,32 @@ func Load() (*Config, error) {
 	}
 	// 旧配置没有 [log] 时补默认值，保证升级后仍能直接启动。
 	cfg.applyLogDefaults()
+	// 旧配置没有 [memory] 时默认开启敏感信息过滤,防止升级后意外关闭安全边界.
+	cfg.applyMemoryDefaults()
 	// 加载完后校验启动配置(环境,端口,数据库路径等),不合法就报错
 	if err := cfg.ValidateBootstrap(); err != nil {
 		return nil, err
 	}
 	// 返回配置指针,调用方拿着这个 cfg 就能拿到所有配置值
 	return &cfg, nil
+}
+
+// applyMemoryDefaults 补齐长期记忆安全配置.
+// 只有配置文件明确写 false 才会关闭过滤.
+func (cfg *Config) applyMemoryDefaults() {
+	if cfg.Memory.SafetyFilterEnabled == nil {
+		enabled := DefaultMemorySafetyFilterEnabled
+		cfg.Memory.SafetyFilterEnabled = &enabled
+	}
+}
+
+// MemorySafetyFilterEnabled 返回长期记忆敏感信息过滤是否开启.
+// 直接构造 Config 且没有调用 Load 时也保持默认开启.
+func (cfg Config) MemorySafetyFilterEnabled() bool {
+	if cfg.Memory.SafetyFilterEnabled == nil {
+		return DefaultMemorySafetyFilterEnabled
+	}
+	return *cfg.Memory.SafetyFilterEnabled
 }
 
 // applyLogDefaults 根据运行环境补齐未显式配置的日志等级和目录。

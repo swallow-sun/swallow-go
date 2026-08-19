@@ -8,6 +8,7 @@
 //  5. GetCandidate: 按候选 ID 查单条.
 //  6. ConfirmCandidate: 确认候选 → 调 repo.ConfirmMemoryCandidate 写正式记忆 + 发埋点.
 //  7. RejectCandidate: 拒绝候选 → 调 repo.RejectMemoryCandidate.
+//  8. 在新建和确认候选前执行敏感信息检查, 禁止敏感原文进入正式长期记忆.
 //
 // 设计要点:
 //   - 方案 16.11.3 节: "用户说的话不直接写 memories, 先产生 pending 候选".
@@ -32,8 +33,12 @@ import (
 
 // NewCandidateService 创建一个 CandidateService.
 // repo 是数据访问层接口, policy 是候选产生规则引擎.
-func NewCandidateService(repo data.Repository, policy *Policy) *CandidateService {
-	return &CandidateService{repo: repo, policy: policy}
+func NewCandidateService(repo data.Repository, policy *Policy, safetyFilterEnabled ...bool) *CandidateService {
+	return &CandidateService{
+		repo:                repo,
+		policy:              policy,
+		safetyFilterEnabled: resolveSafetyFilterEnabled(safetyFilterEnabled),
+	}
 }
 
 // CreateCandidates 在对话完成后调 policy 产生候选并批量写入.
@@ -53,6 +58,15 @@ func (s *CandidateService) CreateCandidates(
 ) ([]data.MemoryCandidate, error) {
 	// 从 context 里取 trace ID
 	traceID := trace.FromContext(ctx)
+
+	// 安全检测必须发生在规则提取和数据库写入之前.
+	// 命中时不记录原文, 只记录敏感类别和必要的审计标识.
+	if s.safetyFilterEnabled {
+		if safety := CheckMemorySafety(userMessage); !safety.Allowed {
+			emitMemoryCandidateBlocked(ctx, userID, safety.Kind)
+			return []data.MemoryCandidate{}, nil
+		}
+	}
 
 	// 调 policy 用确定性规则产生候选
 	specs := s.policy.Generate(userID, sessionID, traceID, userMessage)
@@ -92,6 +106,14 @@ func (s *CandidateService) CreateCandidates(
 // CreateCandidate 手动提交一条记忆候选(API 直接调).
 // 入参是 CandidateSpec, 返回数据库写入后的完整记录.
 func (s *CandidateService) CreateCandidate(ctx context.Context, spec CandidateSpec) (data.MemoryCandidate, error) {
+	// 手动接口和自动候选共用同一安全边界, 防止绕过对话规则直接写入敏感候选.
+	if s.safetyFilterEnabled {
+		if safety := CheckCandidateSafety(spec); !safety.Allowed {
+			emitMemoryCandidateBlocked(ctx, spec.UserID, safety.Kind)
+			return data.MemoryCandidate{}, &SafetyError{Kind: safety.Kind}
+		}
+	}
+
 	// 调 repo 写入
 	candidate, err := s.repo.InsertMemoryCandidate(ctx, spec.ToMemoryCandidate())
 	if err != nil {
@@ -104,6 +126,21 @@ func (s *CandidateService) CreateCandidate(ctx context.Context, spec CandidateSp
 	)
 
 	return candidate, nil
+}
+
+// emitMemoryCandidateBlocked 记录一次候选安全拒绝.
+// 日志和事件只包含敏感类别, 禁止加入用户消息或正则命中的具体值.
+func emitMemoryCandidateBlocked(ctx context.Context, userID int64, kind string) {
+	telemetry.Emit(ctx, telemetry.EventMemoryCandidateBlocked, map[string]any{
+		"user_id":             userID,
+		"sensitive_kind":      kind,
+		telemetry.FieldStatus: telemetry.StatusRejected,
+	})
+	logger.Warn("memory candidate blocked by safety policy",
+		zap.String("trace_id", trace.FromContext(ctx)),
+		zap.Int64("user_id", userID),
+		zap.String("sensitive_kind", kind),
+	)
 }
 
 // ListCandidates 按用户 ID 和状态查候选列表.
@@ -139,6 +176,22 @@ func (s *CandidateService) GetCandidate(ctx context.Context, id, userID int64) (
 // 方案 16.11.3 节: "memory_candidates 变为 confirmed → memories 新增 active → events 写入 memory_confirmed".
 func (s *CandidateService) ConfirmCandidate(ctx context.Context, id, userID int64) (data.Memory, error) {
 	start := time.Now()
+
+	// 确认前重新检查候选, 防止历史数据或数据库外部写入绕过新建阶段的安全检测.
+	candidate, err := s.GetCandidate(ctx, id, userID)
+	if err != nil {
+		return data.Memory{}, fmt.Errorf("get candidate for safety check: %w", err)
+	}
+	if s.safetyFilterEnabled {
+		if safety := CheckMemorySafety(candidate.Content); !safety.Allowed {
+			// 敏感候选保持 pending 会被反复展示, 因此发现后立即转成 rejected.
+			if rejectErr := s.repo.RejectMemoryCandidate(ctx, id, userID); rejectErr != nil {
+				return data.Memory{}, fmt.Errorf("reject unsafe candidate: %w", rejectErr)
+			}
+			emitMemoryCandidateBlocked(ctx, userID, safety.Kind)
+			return data.Memory{}, &SafetyError{Kind: safety.Kind}
+		}
+	}
 
 	// 调 repo 做事务性确认: 改候选状态 + 写 memories + 写 memory_versions
 	memory, err := s.repo.ConfirmMemoryCandidate(ctx, id, userID)

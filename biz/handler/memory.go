@@ -20,11 +20,13 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"strconv"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/swallow-sun/swallow-go/internal/apperror"
+	"github.com/swallow-sun/swallow-go/internal/memory"
 	"github.com/swallow-sun/swallow-go/internal/trace"
 	"github.com/swallow-sun/swallow-go/pkg/logger"
 	"go.uber.org/zap"
@@ -62,6 +64,9 @@ func (d *Deps) CreateCandidate(ctx context.Context, c *app.RequestContext) {
 	// 调 MemoryService 创建候选
 	result, err := d.memory.CreateCandidate(ctx, userID, req.SessionID, req.TraceID, req.Content, req.MemoryType, req.Reason, req.UsageHint)
 	if err != nil {
+		if writeMemorySafetyError(ctx, c, err) {
+			return
+		}
 		logger.Error("create candidate failed", zap.Int64("user_id", userID), zap.Error(err))
 		writeErrorFromCtx(ctx, c, apperror.Internal(""))
 		return
@@ -120,6 +125,9 @@ func (d *Deps) ConfirmCandidate(ctx context.Context, c *app.RequestContext) {
 
 	result, err := d.memory.ConfirmCandidate(ctx, candidateID, userID)
 	if err != nil {
+		if writeMemorySafetyError(ctx, c, err) {
+			return
+		}
 		logger.Error("confirm candidate failed",
 			zap.Int64("candidate_id", candidateID),
 			zap.Int64("user_id", userID),
@@ -219,6 +227,9 @@ func (d *Deps) UpdateMemory(ctx context.Context, c *app.RequestContext) {
 
 	result, err := d.memory.UpdateMemory(ctx, memoryID, userID, req.Content, req.Keywords)
 	if err != nil {
+		if writeMemorySafetyError(ctx, c, err) {
+			return
+		}
 		logger.Error("update memory failed",
 			zap.Int64("memory_id", memoryID),
 			zap.Int64("user_id", userID),
@@ -229,6 +240,21 @@ func (d *Deps) UpdateMemory(ctx context.Context, c *app.RequestContext) {
 	}
 
 	c.JSON(consts.StatusOK, result)
+}
+
+// writeMemorySafetyError 判断业务错误是否来自记忆安全策略.
+// 命中时返回稳定的 HTTP 400 错误, 不把敏感类别和原文暴露给客户端.
+func writeMemorySafetyError(ctx context.Context, c *app.RequestContext, err error) bool {
+	var safetyErr *memory.SafetyError
+	if !errors.As(err, &safetyErr) {
+		return false
+	}
+	writeErrorFromCtx(ctx, c, apperror.BadRequest(
+		apperror.CodeSensitiveMemory,
+		"sensitive information cannot be stored as long-term memory",
+		"",
+	))
+	return true
 }
 
 // DeleteMemory DELETE /api/v1/memories/{id}

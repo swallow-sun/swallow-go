@@ -1,8 +1,8 @@
 // types.go 放 config 包的类型定义.
 //
 // 做的事情:
-//  1. 定义 Config 根结构体:包含 App,Server,LLM,Database,Auth 五组子配置.
-//  2. 定义各子配置结构体:AppConfig(运行环境),ServerConfig(端口),LLMConfig(模型连接),DatabaseConfig(数据库路径和迁移目录),AuthConfig(鉴权).
+//  1. 定义 Config 根结构体和应用需要的全部配置分组.
+//  2. 定义运行环境、服务、模型、数据库、鉴权、日志、记忆等子配置结构体.
 //  3. 所有字段用 toml 标签映射配置文件,LoadedSources 记录实际加载的文件路径列表.
 package config
 
@@ -29,6 +29,8 @@ const (
 	DefaultLogMaxAgeDays = 30
 	// DefaultLogCompress 表示默认压缩轮转后的旧日志。
 	DefaultLogCompress = true
+	// DefaultMemorySafetyFilterEnabled 表示长期记忆敏感信息过滤默认开启.
+	DefaultMemorySafetyFilterEnabled = true
 )
 
 // Config 是整个项目的配置根结构.
@@ -51,10 +53,18 @@ type Config struct {
 	Metrics MetricsConfig `toml:"metrics"`
 	// Log 对应 [log] 段，控制统一日志最低级别和本地目录。
 	Log LogConfig `toml:"log"`
+	// Memory 对应 [memory] 段,放长期记忆安全配置.
+	Memory MemoryConfig `toml:"memory"`
 	// LoadedSources 记录实际加载了哪些配置文件,方便排查"配置从哪来的"
 	// toml:"-" 的意思是:这个字段不参与 TOML 解析,不是从配置文件里读的,
 	// 而是代码在加载文件时自己往里 append 的
 	LoadedSources []string `toml:"-"`
+}
+
+// MemoryConfig 控制长期记忆候选和正式记忆的安全行为.
+type MemoryConfig struct {
+	// SafetyFilterEnabled 控制敏感信息写入过滤;指针用于区分未配置和明确关闭.
+	SafetyFilterEnabled *bool `toml:"safety_filter_enabled"`
 }
 
 // LogConfig 控制控制台和本地文件共用的日志等级与存储目录。

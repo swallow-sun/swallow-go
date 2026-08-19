@@ -6,6 +6,7 @@
 //  3. GetMemory: 按记忆 ID 查单条(带用户归属校验).
 //  4. UpdateMemory: 编辑记忆内容 + 关键词, 内部调 repo.UpdateMemory 写版本记录.
 //  5. DeleteMemory: 软删记忆 + 写 tombstone.
+//  6. 正式记忆编辑前重新执行敏感信息检查, 防止从更新接口绕过安全策略.
 //
 // 设计要点:
 //   - 方案 16.11.4 节: "删除记忆后普通查询和缓存都不再返回它".
@@ -31,8 +32,11 @@ import (
 )
 
 // NewService 创建一个 Service.
-func NewService(repo data.Repository) *Service {
-	return &Service{repo: repo}
+func NewService(repo data.Repository, safetyFilterEnabled ...bool) *Service {
+	return &Service{
+		repo:                repo,
+		safetyFilterEnabled: resolveSafetyFilterEnabled(safetyFilterEnabled),
+	}
 }
 
 // ListMemories 按用户 ID 查 active 记忆列表.
@@ -81,6 +85,14 @@ func (s *Service) GetMemory(ctx context.Context, id, userID int64) (data.Memory,
 // 这里的编辑只改 content 和 keywords, 不改 memory_type 和 user_id.
 // memory_type 在候选确认时就定了, 后续编辑不能改类型.
 func (s *Service) UpdateMemory(ctx context.Context, id, userID int64, content, keywords string) (data.Memory, error) {
+	// 编辑正式记忆也必须经过安全检测, 防止从更新接口绕过候选阶段的保护.
+	if s.safetyFilterEnabled {
+		if safety := CheckMemorySafety(content + "\n" + keywords); !safety.Allowed {
+			emitMemoryCandidateBlocked(ctx, userID, safety.Kind)
+			return data.Memory{}, &SafetyError{Kind: safety.Kind}
+		}
+	}
+
 	// 先查出记忆, 做用户归属校验
 	memory, err := s.GetMemory(ctx, id, userID)
 	if err != nil {

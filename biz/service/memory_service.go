@@ -27,19 +27,26 @@ import (
 
 	"github.com/swallow-sun/swallow-go/internal/data"
 	"github.com/swallow-sun/swallow-go/internal/memory"
+	"github.com/swallow-sun/swallow-go/pkg/logger"
 )
 
 // NewMemoryService 创建一个 MemoryService.
 // 入参是 service.Deps, 里面有 repo, 用 repo 构造 memory 包的三个组件.
 func NewMemoryService(deps *Deps) *MemoryService {
+	safetyFilterEnabled := deps.cfg.MemorySafetyFilterEnabled()
 	// 创建确定性规则引擎
 	policy := memory.NewPolicy()
 	// 创建候选管理服务, 传入 repo 和 policy
-	candidate := memory.NewCandidateService(deps.repo, policy)
+	candidate := memory.NewCandidateService(deps.repo, policy, safetyFilterEnabled)
 	// 创建检索器
 	retriever := memory.NewRetriever(deps.repo)
 	// 创建正式记忆 CRUD 服务
-	memService := memory.NewService(deps.repo)
+	memService := memory.NewService(deps.repo, safetyFilterEnabled)
+	if !safetyFilterEnabled {
+		logger.Warn("long-term memory safety filter is disabled")
+	} else {
+		logger.Debug("long-term memory safety filter is enabled")
+	}
 
 	return &MemoryService{
 		candidate:  candidate,

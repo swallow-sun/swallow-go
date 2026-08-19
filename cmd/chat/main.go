@@ -229,8 +229,13 @@ func run() (runErr error) {
 		Model:   cfg.LLM.Model,
 	})
 
-	// memory.New 创建记忆管理器,传入 repo 用于读写历史消息
-	mem := memory.New(repo)
+	// memory.New 创建记忆管理器,传入 repo 用于读写历史消息.
+	// CLI 和 HTTP 服务使用同一个长期记忆安全开关,避免两个入口行为不一致.
+	safetyFilterEnabled := cfg.MemorySafetyFilterEnabled()
+	mem := memory.New(repo, safetyFilterEnabled)
+	if !safetyFilterEnabled {
+		logger.Warn("long-term memory safety filter is disabled")
+	}
 
 	// agent.NewWithDB 创建对话 Agent,参数依次是:
 	// llmProvider:调 LLM 用的 provider

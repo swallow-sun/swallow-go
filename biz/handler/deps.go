@@ -32,7 +32,7 @@ func NewDeps(cfg *config.Config, repo data.Repository) *Deps {
 		// identity.New(repo) 创建身份管理器, 传入 repo 用来存取用户/会话数据
 		identity.New(repo),
 		// memory.New(repo) 创建对话记忆存储, 传入 repo 用来存取历史消息
-		memory.New(repo),
+		memory.New(repo, cfg.MemorySafetyFilterEnabled()),
 		// llm.NewOpenAICompat 创建一个兼容 OpenAI API 的 LLM 客户端
 		// llm.Config 是配置结构体, 包含 BaseURL, APIKey, Model 三个字段
 		llm.NewOpenAICompat(llm.Config{
@@ -48,9 +48,9 @@ func NewDeps(cfg *config.Config, repo data.Repository) *Deps {
 	// 用 svcDeps 创建五个 Service, 装进 Deps 结构体返回.
 	// 五个 Service 共用同一份底层依赖(同一个数据库连接, 同一个 LLM 客户端等)
 	return &Deps{
-		chat:      service.NewChatService(svcDeps),       // ChatService 处理 /api/chat 流式对话
+		chat:      service.NewChatService(svcDeps),      // ChatService 处理 /api/chat 流式对话
 		session:   service.NewSessionService(svcDeps),   // SessionService 处理 /api/session 会话创建
-		history:   service.NewHistoryService(svcDeps),  // HistoryService 处理 /api/history 历史查询
+		history:   service.NewHistoryService(svcDeps),   // HistoryService 处理 /api/history 历史查询
 		dashboard: service.NewDashboardService(svcDeps), // DashboardService 处理 /api/v1/dashboard 看板查询
 		memory:    service.NewMemoryService(svcDeps),    // MemoryService 处理 /api/v1/memory-candidates 和 /api/v1/memories 记忆管理
 	}

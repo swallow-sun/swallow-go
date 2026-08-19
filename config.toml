@@ -33,6 +33,10 @@ model    = "deepseek-chat"
 path = "data/swallow.db"
 migrations_dir = "script/migrations"
 
+[memory]
+# 长期记忆敏感信息过滤开关.默认开启;关闭后密码、Token 等内容可能进入记忆数据库.
+safety_filter_enabled = true
+
 [auth]
 # 可在不提交 Git 的 config.local.toml 中填写，首次启动后会加密写入数据库。
 owner_token = ""

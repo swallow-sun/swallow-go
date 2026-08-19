@@ -24,10 +24,10 @@ import (
 )
 
 // New 创建一个 memory Store.
-// 把 data.Repository 传进来,Store 靠它来读写对话历史.
-func New(repo data.Repository) *Store {
+// safetyFilterEnabled 不传时默认开启;传入 false 时明确关闭敏感信息过滤.
+func New(repo data.Repository, safetyFilterEnabled ...bool) *Store {
 	// 构造一个 Store,把 repo 存进去,后面所有方法都用它操作数据库
-	return &Store{repo: repo}
+	return &Store{repo: repo, safetyFilterEnabled: resolveSafetyFilterEnabled(safetyFilterEnabled)}
 }
 
 // SaveMessage 保存一条用户或助手消息,并记录 dialogue 埋点.
@@ -209,6 +209,6 @@ func (s *Store) SearchLongTerm(ctx context.Context, userID int64, query string, 
 // CreateCandidates 在完整一轮对话成功保存后生成 pending 长期记忆候选。
 // 候选必须由用户通过确认接口处理，本方法不会直接写入正式 memories 表。
 func (s *Store) CreateCandidates(ctx context.Context, userID int64, sessionID, userMessage string) ([]data.MemoryCandidate, error) {
-	service := NewCandidateService(s.repo, NewPolicy())
+	service := NewCandidateService(s.repo, NewPolicy(), s.safetyFilterEnabled)
 	return service.CreateCandidates(ctx, userID, sessionID, userMessage)
 }
