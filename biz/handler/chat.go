@@ -1,10 +1,11 @@
-// chat.go 放 POST /api/chat 接口的 handler.
+// chat.go 放主人和嵌入式设备共用的流式聊天 handler.
 //
 // 做的事情:
-//  1. 解析客户端发来的 JSON 请求体(session_id, client_message_id, message).
-//  2. 调 ChatService.Chat 拿到事件 channel(或业务错误).
-//  3. 从 channel 读事件, 转成 SSE 帧实时写给客户端.
-//  4. 通过 ctx.Done() 检测客户端断开, 停止读 channel.
+//  1. Chat 负责 POST /api/chat 的主人令牌认证.
+//  2. chatForUser 接收认证得到的 userID/deviceID,复用参数校验和 SSE 链路.
+//  3. 调 ChatService.Chat 拿到事件 channel(或业务错误).
+//  4. 从 channel 读事件,转成 SSE 帧实时写给客户端.
+//  5. 通过 ctx.Done() 检测客户端断开,停止读 channel.
 //
 // 幂等管理, LLM 调用, 状态流转等业务逻辑全在 service 层,
 // handler 只管 HTTP 解析和 SSE 协议转换.
@@ -23,25 +24,39 @@ import (
 	"go.uber.org/zap"
 )
 
-// Chat POST /api/chat
+// Chat 处理 POST /api/chat 主人聊天接口.
+// 该入口必须先通过 owner Bearer Token 认证,再进入共用聊天链路.
 // Chat 使用 SSE 返回流式对话.
 // message 事件传输回答片段, usage 事件传输 Token 用量,
 // error 事件表示流式读取失败, done 事件表示正常结束.
 func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
+	// 主人聊天入口先校验 owner Bearer Token,再进入共用聊天处理链路.
+	if !d.authorizeOwner(c) {
+		metrics.RecordRequest(metrics.ComponentGo, "chat", metrics.StatusFailed, 0)
+		return
+	}
+	ctx, _ = trace.Ensure(ctx)
+	d.chatForUser(ctx, c, d.chat.OwnerID(), "", "chat", "POST /api/chat")
+}
+
+// chatForUser 是主人聊天和设备聊天共用的 HTTP/SSE 处理链路.
+// 调用前必须完成身份认证,userID 和 deviceID 只能来自认证结果,不能信任请求体.
+// 主人请求的 deviceID 为空;设备请求传入认证得到的设备 UUID.
+// 该 UUID 会进入埋点和模型用量记录,用于按设备审计和制作看板.
+func (d *Deps) chatForUser(
+	ctx context.Context,
+	c *app.RequestContext,
+	userID int64,
+	deviceID, metricOperation, spanOperation string,
+) {
 	// 记录请求开始时间, defer 里算耗时打 Prometheus 指标
 	start := time.Now()
 	// status 记录这次请求的最终结果(ok/failed/cancelled),
 	// 各退出路径修改它, defer 里统一调 RecordRequest
 	status := metrics.StatusOK
 	defer func() {
-		metrics.RecordRequest(metrics.ComponentGo, "chat", status, float64(time.Since(start).Milliseconds()))
+		metrics.RecordRequest(metrics.ComponentGo, metricOperation, status, float64(time.Since(start).Milliseconds()))
 	}()
-
-	// 认证: 校验 owner Bearer Token
-	if !d.authorizeOwner(c) {
-		status = metrics.StatusFailed
-		return
-	}
 
 	// 确保 context 里有 trace ID, 后面 Span 和所有子调用共用同一个 trace ID.
 	ctx, _ = trace.Ensure(ctx)
@@ -88,18 +103,21 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 	// 确保 context 里有 trace ID 已在认证后完成, 这里创建根 Span.
 	// trace.StartSpan 从 context 里取 trace ID 和父 Span(这里没有父 Span, 是根),
 	// 把 Span 塞进 context 返回, 后面的 service 和 agent 层能通过 context 找到这个 Span 作为父.
-	ctx, span := trace.StartSpan(ctx, "handler", "POST /api/chat")
+	ctx, span := trace.StartSpan(ctx, "handler", spanOperation)
+	if deviceID != "" {
+		span.SetAttr("device_id", deviceID)
+	}
 	// defer span.EndOK() 保证无论正常返回还是中途出错都标记 Span 结束
 	defer span.EndOK()
 
 	// 调 ChatService.Chat 启动流式对话.
-	// 传入 owner user ID, service 层用它做会话归属校验.
+	// 传入认证得到的 user ID,service 层用它做会话归属校验.
 	// d.chat 是 Deps 里的 ChatService 指针, 在 NewDeps 时创建好的
 	// 返回两个值:
 	//   events — 一个 channel, service 层往里面塞 ChatEvent, handler 从里面读
 	//   err — 请求还没开始就失败了(幂等冲突, Agent 创建失败等), 直接写 HTTP 错误
 	// err == nil 说明流式对话已开始, 后面从 channel 读事件转 SSE
-	events, err := d.chat.Chat(ctx, req.SessionID, req.ClientMessageID, req.Message, d.chat.OwnerID())
+	events, err := d.chat.Chat(ctx, req.SessionID, req.ClientMessageID, req.Message, userID, deviceID)
 	if err != nil {
 		// service.FromChatError 尝试把 error 转成 *ChatError
 		// 转成了说明是业务错误(幂等冲突, 会话不存在等), 有明确的 HTTP 状态码和错误码

@@ -7,6 +7,7 @@
 //  4. 逐块发 channel: 把 chunk 通过 ChatEvent channel 发给 handler, handler 转 SSE 写给客户端.
 //  5. 收尾持久化: 保存助手回复 + 完成幂等请求 + 刷新会话活跃时间.
 //  6. 幂等重放: 相同幂等键的已完成请求, 读出历史结果通过 channel 重放给客户端.
+//  7. 设备归因:设备入口把认证得到的 deviceID 写入埋点和 model_usages,主人入口留空.
 //
 // 设计要点:
 //   - Chat 返回 (<-chan ChatEvent, error). error 非 nil 表示请求还没开始就失败了(幂等冲突, Agent 创建失败等),
@@ -84,13 +85,27 @@ func NewChatService(deps *Deps) *ChatService {
 //   - error: 不是 nil 说明请求还没开始就失败了(幂等冲突, Agent 创建失败等), handler 直接返回 HTTP 错误.
 //
 // ctx 由 handler 传进来, service 用它检测客户端有没有断开.
-func (s *ChatService) Chat(ctx context.Context, sessionID, clientMessageID, message string, userID int64) (<-chan ChatEvent, error) {
+// deviceIDs 是可选的设备归因参数:不传表示主人请求;设备请求传一个认证后的设备 UUID.
+// 使用可变参数是为了兼容原有调用点,业务上只读取第一个值,不能传入未经认证的请求字段.
+func (s *ChatService) Chat(
+	ctx context.Context,
+	sessionID, clientMessageID, message string,
+	userID int64,
+	deviceIDs ...string,
+) (<-chan ChatEvent, error) {
+	deviceID := ""
+	if len(deviceIDs) > 0 {
+		deviceID = deviceIDs[0]
+	}
 	// 创建子 Span: Service 层, 记录对话业务逻辑的耗时.
 	// trace.StartSpan 从 context 里取父 Span(Handler 层的根 Span), 把自己挂上去.
 	// 返回的 ctx 里塞了当前 Span, 后面 ChatStream 调 trace.StartSpan 时能从 ctx 里找到这个 Span 作为父.
 	ctx, span := trace.StartSpan(ctx, "chat_service", "chat")
 	// 给 Span 加附加属性: 会话 ID, 方便后续按会话查询 Span
 	span.SetAttr("session_id", sessionID)
+	if deviceID != "" {
+		span.SetAttr("device_id", deviceID)
+	}
 	// defer span.EndOK() 保证无论正常返回还是中途出错都标记 Span 结束
 	defer span.EndOK()
 
@@ -118,6 +133,7 @@ func (s *ChatService) Chat(ctx context.Context, sessionID, clientMessageID, mess
 		telemetry.EventMessageReceived,
 		map[string]any{
 			"session_id":          sessionID,
+			"device_id":           deviceID,
 			"client_message_id":   clientMessageID,
 			"message_chars":       len(message),
 			telemetry.FieldStatus: telemetry.StatusOK,
@@ -192,7 +208,7 @@ func (s *ChatService) Chat(ctx context.Context, sessionID, clientMessageID, mess
 
 	// go 关键字启动一个新协程(轻量级线程), 在后台跑 streamLoop
 	// 主协程直接返回 events channel 给 handler, handler 和 streamLoop 并行工作
-	go s.streamLoop(chatCtx, ag, streamReader, chatRequest, events, traceID, cancel)
+	go s.streamLoop(chatCtx, ag, streamReader, chatRequest, events, traceID, deviceID, cancel)
 
 	return events, nil
 }
@@ -208,6 +224,7 @@ func (s *ChatService) streamLoop(
 	chatRequest data.ChatRequest,
 	events chan<- ChatEvent,
 	traceID string,
+	deviceID string,
 	cancel context.CancelFunc,
 ) {
 	// defer 把这个匿名函数推迟到 streamLoop return 时执行
@@ -316,6 +333,7 @@ func (s *ChatService) streamLoop(
 		TraceID:           traceID,                              // 链路追踪 ID
 		SessionID:         chatRequest.SessionID,                // 哪个会话产生的
 		UserID:            chatRequest.UserID,                   // 哪个用户产生的
+		DeviceID:          deviceID,                             // 哪台设备产生的,主人接口为空
 		Provider:          s.deps.cfg.LLM.Provider,              // 供应商名称, 如 "deepseek"
 		Model:             s.deps.cfg.LLM.Model,                 // 模型名, 如 "deepseek-chat"
 		Operation:         data.ModelOperationChat,              // 操作类型: 文字对话

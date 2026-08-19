@@ -2,9 +2,9 @@
 //
 // 做的事情:
 //  1. 定义 Repository 接口:数据访问层的统一接口,抽象所有数据库操作,换数据库只需换实现不改业务代码.
-//  2. 定义业务实体结构体:User,Session,Dialogue,ChatRequest,Event,AppSetting,EncryptedSecret 等.
+//  2. 定义业务实体结构体:User、Device、Session、Dialogue、ChatRequest、Event、配置等.
 //  3. 定义 ORM 模型结构体:ormUser,ormSession,ormDialogue 等,带 GORM 标签映射数据库表.
-//  4. 定义状态常量:迁移状态(running/completed/failed)和聊天请求状态(accepted/running/completed/failed).
+//  4. 定义迁移、聊天请求、模型用量、设备和长期记忆状态常量.
 //  5. 定义各表列名常量:SELECT 查询用显式列名,不用 SELECT *.
 //  6. 定义迁移相关结构体:Migration(磁盘迁移文件)和 MigrationRecord(schema_migrations 表记录).
 //  7. 定义 Span ORM 模型:ormSpan 对应 spans 表,记录一次请求经过的每个处理步骤.
@@ -69,6 +69,13 @@ const (
 	// ErrDuplicatedKey 表示插入时违反了唯一约束(比如用户名重复).
 	// 上层据此做"冲突后重新查询"的并发安全处理,而不是直接报错.
 	ErrDuplicatedKey = "duplicated_key"
+
+	// DeviceStatusActive 表示设备令牌有效,允许通过设备认证.
+	DeviceStatusActive = "active"
+	// DeviceStatusRevoked 表示设备已被用户吊销,禁止继续访问服务端.
+	DeviceStatusRevoked = "revoked"
+	// deviceColumns 是查询 devices 表时使用的完整显式列名.
+	deviceColumns = "id, user_id, name, platform, token_hash, status, capabilities_json, created_at, last_seen_at, revoked_at"
 )
 
 // Repository 是数据访问层的统一接口.
@@ -77,6 +84,7 @@ const (
 //
 // 方法分组:
 //   - 用户:CreateUser,GetUser,GetUserByName,UpdateUserActive
+//   - 设备:CreateDevice,GetDevice,UpdateDeviceLastSeen
 //   - 会话:CreateSession,GetSession,UpdateSessionActive
 //   - 对话:InsertDialogue,GetDialogue,GetDialogueByTraceAndRole,GetRecentDialogues
 //   - 聊天幂等:BeginChatRequest,MarkChatRequestRunning,CompleteChatRequest,FailChatRequest
@@ -94,6 +102,13 @@ type Repository interface {
 	GetUserByName(ctx context.Context, name string) (User, error)
 	// UpdateUserActive 更新用户最后活跃时间.
 	UpdateUserActive(ctx context.Context, id int64) error
+
+	// CreateDevice 注册一台设备,令牌字段只接收不可逆摘要.
+	CreateDevice(ctx context.Context, device Device) (Device, error)
+	// GetDevice 按设备 UUID 查询设备身份.
+	GetDevice(ctx context.Context, id string) (Device, error)
+	// UpdateDeviceLastSeen 更新设备最近一次认证成功时间.
+	UpdateDeviceLastSeen(ctx context.Context, id string, at time.Time) error
 
 	// CreateSession 新建会话.
 	CreateSession(ctx context.Context, sessionID string, userID int64) (Session, error)
@@ -232,6 +247,35 @@ type User struct {
 	CreatedAt time.Time
 	// LastActiveAt 是最后活跃时间
 	LastActiveAt time.Time
+}
+
+// Device 是一台已经注册到 Go 服务端的嵌入式设备业务对象.
+// TokenHash 只保存认证令牌摘要,任何接口和日志都不能返回这个字段.
+type Device struct {
+	ID               string     // 服务端生成的设备 UUID
+	UserID           int64      // 设备所属用户 ID
+	Name             string     // 用户可读设备名称
+	Platform         string     // 运行平台,如 linux-arm64
+	TokenHash        string     // 设备令牌的 SHA-256 十六进制摘要
+	Status           string     // active 或 revoked
+	CapabilitiesJSON string     // 设备能力 JSON
+	CreatedAt        time.Time  // 首次注册时间
+	LastSeenAt       *time.Time // 最近认证成功时间
+	RevokedAt        *time.Time // 吊销时间
+}
+
+// ormDevice 是 devices 表的 GORM ORM 模型.
+type ormDevice struct {
+	ID               string     `gorm:"primaryKey"`                                            // 设备 UUID 主键
+	UserID           int64      `gorm:"not null;uniqueIndex:idx_devices_user_name"`            // 所属用户 ID
+	Name             string     `gorm:"not null;uniqueIndex:idx_devices_user_name"`            // 同一用户下唯一名称
+	Platform         string     `gorm:"not null;default:''"`                                   // 设备运行平台
+	TokenHash        string     `gorm:"not null"`                                              // 认证令牌摘要
+	Status           string     `gorm:"not null;default:active;index:idx_devices_user_status"` // 设备状态
+	CapabilitiesJSON string     `gorm:"not null;default:'{}'"`                                 // 设备能力 JSON
+	CreatedAt        time.Time  `gorm:"not null;index:idx_devices_user_status"`                // 注册时间
+	LastSeenAt       *time.Time // 最近认证成功时间
+	RevokedAt        *time.Time // 吊销时间
 }
 
 // Session 是会话业务对象.

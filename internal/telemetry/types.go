@@ -1,7 +1,7 @@
 // types.go 放 telemetry 包的类型定义和常量.
 //
 // 做的事情:
-//  1. 定义对话、模型、记忆查询、记忆确认和记忆安全拒绝等事件类型常量.
+//  1. 定义对话、模型、记忆、设备注册和设备认证等事件类型常量.
 //  2. 定义通用字段名和状态值常量:status(ok/error/connected),ms(耗时毫秒).
 //  3. 定义 Event 结构体:一条埋点事件,包含类型,数据,trace ID,时间戳等.
 //  4. 定义 EventSink 接口:写库用的 Sink,由 data.EventSinkAdapter 实现,免得 telemetry 直接依赖 data 包.
@@ -51,6 +51,8 @@ const (
 	EventMemoryQuery            = "memory_query"             // 记忆查询事件: 检索长期记忆(业务事件, 非 6 种之一)
 	EventMemoryConfirmed        = "memory_confirmed"         // 记忆确认事件: 候选确认后写正式记忆(方案 16.11.3 节)
 	EventMemoryCandidateBlocked = "memory_candidate_blocked" // 记忆候选安全拒绝事件: 只记录敏感类别, 不记录原文
+	EventDeviceRegistered       = "device_registered"        // 设备注册事件:主人完成设备注册,不包含明文令牌或令牌摘要
+	EventDeviceAuthenticated    = "device_authenticated"     // 设备认证事件:令牌校验成功,用于最近在线和安全审计
 
 	// 下面是通用事件字段名,放在 Fields map 里的 key.
 	FieldStatus     = "status" // 状态字段:值是 ok/error/connected

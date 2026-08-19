@@ -4,13 +4,15 @@
 //  1. 接收 handler 传来的用户名(为空时默认 "owner").
 //  2. 调 identity.Manager.LoginOrCreateUser: 按用户名查库, 有则更新活跃时间, 没有则新建.
 //  3. 调 identity.Manager.NewSession: 给用户创建一条新会话, 返回 UUID.
-//  4. 返回 CreateSessionResult 给 handler 序列化成 JSON 响应.
+//  4. 设备入口复用已认证用户创建会话,不再接受客户端自报用户名.
+//  5. 返回 CreateSessionResult 给 handler 序列化成 JSON 响应.
 package service
 
 import (
 	"context"
 	"fmt"
 
+	"github.com/swallow-sun/swallow-go/internal/data"
 	"github.com/swallow-sun/swallow-go/internal/telemetry"
 	"github.com/swallow-sun/swallow-go/internal/trace"
 	"github.com/swallow-sun/swallow-go/pkg/logger"
@@ -39,7 +41,29 @@ func (s *SessionService) CreateSession(ctx context.Context, userName string) (Cr
 		// 底层 fmt.Errorf 往上抛, 入口层(handler)统一打日志
 		return CreateSessionResult{}, fmt.Errorf("failed to init user: %w", err)
 	}
+	return s.createSessionForKnownUser(ctx, user, "")
+}
 
+// CreateSessionForUser 为已经通过设备认证的用户创建会话.
+// userID 必须来自设备认证结果,不能使用请求体提供的用户 ID.
+func (s *SessionService) CreateSessionForUser(
+	ctx context.Context,
+	userID int64,
+	deviceIDs ...string,
+) (CreateSessionResult, error) {
+	user, err := s.deps.repo.GetUser(ctx, userID)
+	if err != nil {
+		return CreateSessionResult{}, fmt.Errorf("get authenticated device user: %w", err)
+	}
+	deviceID := ""
+	if len(deviceIDs) > 0 {
+		deviceID = deviceIDs[0]
+	}
+	return s.createSessionForKnownUser(ctx, user, deviceID)
+}
+
+// createSessionForKnownUser 是主人入口和设备入口共用的会话创建实现.
+func (s *SessionService) createSessionForKnownUser(ctx context.Context, user data.User, deviceID string) (CreateSessionResult, error) {
 	// 给这个用户创建一条新会话.
 	// NewSession 往 sessions 表插一条记录, 返回 UUID 格式的会话 ID
 	sessionID, err := s.deps.idm.NewSession(ctx, user.ID)
@@ -64,6 +88,7 @@ func (s *SessionService) CreateSession(ctx context.Context, userName string) (Cr
 			"session_id":          sessionID,
 			"user_id":             user.ID,
 			"user_name":           user.Name,
+			"device_id":           deviceID,
 			telemetry.FieldStatus: telemetry.StatusOK,
 		},
 	)

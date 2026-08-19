@@ -1,7 +1,7 @@
 // types.go 放所有 handler 共用的类型定义.
 //
 // 做的事情:
-//  1. 定义 Deps 结构体: handler 层的依赖集合, 持有三个 Service.
+//  1. 定义 Deps 结构体:handler 层的依赖集合,持有六个 Service.
 //  2. 定义 HTTP 请求/响应结构体: createSessionReq, chatReq, historyResp 等,
 //     客户端发来的 JSON 反序列化到请求结构体, 响应结构体序列化成 JSON 发给客户端.
 package handler
@@ -33,7 +33,7 @@ const (
 	ResponseStatusDeleted = "deleted"
 )
 
-// Deps 是 handler 层的依赖集合, 持有五个 Service.
+// Deps 是 handler 层的依赖集合,持有六个 Service.
 // handler 通过 Service 间接访问数据层, 跟 HTTP 解析和业务逻辑分开.
 // Deps 在程序启动时由 main.go 构造, 所有 handler 方法都挂在 *Deps 上.
 type Deps struct {
@@ -47,6 +47,34 @@ type Deps struct {
 	dashboard *service.DashboardService
 	// memory 持有 *service.MemoryService, 负责长期记忆候选和正式记忆管理
 	memory *service.MemoryService
+	// device 持有 *service.DeviceService,负责设备注册、认证和身份归属查询.
+	device *service.DeviceService
+}
+
+// registerDeviceReq 是主人注册嵌入式设备的请求体.
+type registerDeviceReq struct {
+	Name         string         `json:"name"`         // 用户可读设备名称
+	Platform     string         `json:"platform"`     // 运行平台,如 linux-arm64
+	Capabilities map[string]any `json:"capabilities"` // 设备支持的能力描述
+}
+
+// devicePublicResp 是可以返回给客户端的设备公开信息.
+// 不包含数据库保存的 TokenHash.
+type devicePublicResp struct {
+	ID           string         `json:"id"`                     // 设备 UUID
+	Name         string         `json:"name"`                   // 用户可读设备名称
+	Platform     string         `json:"platform"`               // 运行平台
+	Status       string         `json:"status"`                 // active 或 revoked
+	Capabilities map[string]any `json:"capabilities"`           // 设备能力描述
+	CreatedAt    string         `json:"created_at"`             // 注册时间
+	LastSeenAt   string         `json:"last_seen_at,omitempty"` // 最近认证时间
+}
+
+// registerDeviceResp 是设备注册成功响应.
+// Token 只返回这一次,设备必须立即安全保存.
+type registerDeviceResp struct {
+	Device devicePublicResp `json:"device"` // 设备公开信息
+	Token  string           `json:"token"`  // 只返回一次的设备认证令牌
 }
 
 type createCandidateReq struct {

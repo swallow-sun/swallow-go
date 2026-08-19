@@ -17,16 +17,21 @@ cp config.toml config.local.toml
 # 2. 启动 HTTP 服务（首次启动自动建表 + 迁移）
 make run
 
-# 3. 创建会话
-curl -X POST http://localhost:8888/api/session
+# 3. 创建主人会话
+curl -X POST http://localhost:8888/api/session \
+  -H "Authorization: Bearer <owner_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"user_name":"owner"}'
 
 # 4. 发消息（SSE 流式返回）
 curl -X POST http://localhost:8888/api/chat \
+  -H "Authorization: Bearer <owner_token>" \
   -H "Content-Type: application/json" \
-  -d '{"session_id":"<上一步返回的ID>","content":"你好"}'
+  -d '{"session_id":"<上一步返回的ID>","client_message_id":"<UUID>","message":"你好"}'
 
 # 5. 查历史消息
-curl "http://localhost:8888/api/history?session_id=<ID>"
+curl "http://localhost:8888/api/history?session_id=<ID>" \
+  -H "Authorization: Bearer <owner_token>"
 ```
 
 也可以用 CLI 对话：`make chat`
@@ -47,6 +52,7 @@ swallow-go/
 │   ├── config/          # TOML 配置加载
 │   ├── data/            # 数据层（GORM + SQLite，Repository 接口）
 │   ├── debug/           # pprof 调试服务
+│   ├── device/          # 设备注册、令牌生成与设备身份认证
 │   ├── identity/        # 身份识别
 │   ├── memory/         # 短期记忆（对话上下文）
 │   ├── provider/llm/    # LLM 供应商（OpenAI 兼容协议）
@@ -77,6 +83,13 @@ swallow-go/
 | POST | `/api/session` | 创建会话 |
 | GET | `/api/history?session_id=` | 查历史消息 |
 | POST | `/api/chat` | 发消息对话（SSE 流式） |
+| POST | `/api/v1/devices/register` | 使用主人令牌注册设备，设备令牌只返回一次 |
+| GET | `/api/v1/devices/me` | 使用设备令牌查询当前设备身份 |
+| POST | `/api/v1/device/session` | 使用设备令牌创建对话会话 |
+| POST | `/api/v1/device/chat` | 使用设备令牌调用 Go 云端模型（SSE 流式） |
+| GET | `/api/v1/memory-candidates` | 查询长期记忆候选 |
+| GET | `/api/v1/memories` | 查询正式长期记忆 |
+| GET | `/api/v1/dashboard/model-usage` | 查询模型用量看板数据 |
 
 ## 数据库
 
@@ -88,6 +101,13 @@ SQLite + WAL 模式，版本化迁移（`script/migrations/`）：
 | 2 | 0002_chat_requests | chat_requests（幂等） |
 | 3 | 0003_runtime_settings | app_settings / encrypted_secrets |
 | 4 | 0004_model_usages | model_usages（Token 用量 + 费用估算） |
+| 5 | 0005_create_spans | spans（调用链步骤） |
+| 6 | 0006_create_model_price_snapshots | 模型价格快照 |
+| 7 | 0007_create_model_usage_daily | 模型用量日聚合 |
+| 8 | 0008_create_memory_tables | 长期记忆候选、正式记忆、版本和删除墓碑 |
+| 9 | 0009_fix_model_usage_daily_unique | 修复模型用量日聚合唯一索引 |
+| 10 | 0010_users_name_unique | 用户名唯一索引 |
+| 11 | 0011_create_devices | 设备身份、令牌摘要、状态和最近在线时间 |
 
 迁移铁律：已执行的迁移文件不可修改，要改表结构必须新写更高版本的迁移文件。
 

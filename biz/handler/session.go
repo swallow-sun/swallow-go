@@ -22,7 +22,7 @@ import (
 // 流程: 解析 HTTP 请求 → 调 SessionService.CreateSession → 把结果写成 JSON 返回.
 //
 // 参数说明:
-//   - d: *Deps 指针, 持有三个 Service, d.session 就是会话服务
+//   - d: *Deps 指针,持有六个 Service,d.session 就是会话服务
 //   - ctx: 上下文, 能传递超时和取消信号
 //   - c: Hertz 的请求上下文 *app.RequestContext, 每个 HTTP 请求对应一个,
 //     能读请求体, 写响应, 操作 HTTP 头

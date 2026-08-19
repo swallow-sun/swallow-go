@@ -4,7 +4,7 @@
 //  1. 定义 Deps 结构体: service 层的底层依赖集合(cfg/repo/idm/mem/llm), 由 NewDeps 构造函数传进来.
 //  2. 定义 ChatError: 业务错误, 带 HTTP 状态码和稳定错误码, handler 拿到后直接映射 HTTP 响应.
 //  3. 定义 ChatEvent/UsageData: 流式对话事件类型, service 通过 channel 发给 handler, handler 转 SSE.
-//  4. 定义 SessionService/HistoryService 的返回值结构体: CreateSessionResult, HistoryResult 等.
+//  4. 定义会话、历史、看板、长期记忆和设备服务及其返回值结构体.
 //  5. 定义 chat 接口的稳定错误码常量和 client_message_id 最大长度限制.
 //
 // service 不依赖任何 HTTP 框架类型(不 import hertz),
@@ -14,6 +14,7 @@ package service
 import (
 	"github.com/swallow-sun/swallow-go/internal/config"
 	"github.com/swallow-sun/swallow-go/internal/data"
+	"github.com/swallow-sun/swallow-go/internal/device"
 	"github.com/swallow-sun/swallow-go/internal/identity"
 	"github.com/swallow-sun/swallow-go/internal/memory"
 	"github.com/swallow-sun/swallow-go/internal/provider/llm"
@@ -96,6 +97,20 @@ type MemoryService struct {
 	candidate  *memory.CandidateService // 候选生命周期管理
 	retriever  *memory.Retriever        // 正式记忆检索
 	memService *memory.Service          // 正式记忆增删改查
+}
+
+// DeviceService 编排设备注册和设备身份认证.
+// manager 执行令牌安全逻辑,ownerID 限定第一版设备只能注册到主人名下.
+type DeviceService struct {
+	manager *device.Manager // 设备身份领域管理器
+	ownerID int64           // 当前主人用户 ID
+}
+
+// RegisterDeviceResult 是设备注册业务结果.
+// Token 只在注册成功响应中返回一次.
+type RegisterDeviceResult struct {
+	Device data.Device // 已注册设备公开信息
+	Token  string      // 只返回一次的设备认证令牌
 }
 
 type CreateCandidateResult struct {
@@ -191,15 +206,15 @@ type HistoryResult struct {
 	Items     []HistoryItem // 对话记录列表, 按时间正序排列
 }
 
-// Deps 是三个 Service 共用的底层依赖集合.
+// Deps 是六个 Service 共用的底层依赖集合.
 // service 层不自己创建 repo/idm/mem/llm, 而是由 handler 层的 NewDeps 组装好后传进来.
 // 字段是小写(包外不可见), 外部通过 NewDeps 构造函数创建.
 // 小写字段意味着 biz/service 包外面不能直接改这些字段, 保证依赖组装只在 NewDeps 里做
 type Deps struct {
-	cfg        *config.Config
-	repo       data.Repository
-	idm        *identity.Manager
-	mem        *memory.Store
-	llm        llm.Provider
-	ownerID    int64 // owner 用户 ID, 启动时查出并缓存, 用于 chat/history 接口的用户隔离
+	cfg     *config.Config
+	repo    data.Repository
+	idm     *identity.Manager
+	mem     *memory.Store
+	llm     llm.Provider
+	ownerID int64 // owner 用户 ID, 启动时查出并缓存, 用于 chat/history 接口的用户隔离
 }

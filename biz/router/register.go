@@ -4,7 +4,9 @@
 //  1. 注册健康检查路由: GET /ping.
 //  2. 注册对话 API 路由: POST /api/session, GET /api/history, POST /api/chat.
 //  3. 注册看板 API 路由: GET /api/v1/dashboard/model-usage.
-//  4. 路由对应的 handler 方法绑定在 deps 上, 共享同一份依赖.
+//  4. 注册长期记忆管理 API.
+//  5. 注册设备身份、设备会话和设备云端聊天 API.
+//  6. 路由对应的 handler 方法绑定在 deps 上,共享同一份依赖.
 package router
 
 import (
@@ -68,6 +70,14 @@ func Register(r *server.Hertz, deps *handler.Deps) {
 		v1.GET("/memories", deps.ListMemories)
 		v1.PATCH("/memories/:id", deps.UpdateMemory)
 		v1.DELETE("/memories/:id", deps.DeleteMemory)
+
+		// 设备身份 API:注册使用主人令牌,查询当前设备使用独立设备令牌.
+		v1.POST("/devices/register", deps.RegisterDevice)
+		v1.GET("/devices/me", deps.GetCurrentDevice)
+
+		// 设备云端能力 API:设备令牌认证后创建会话并调用共用云端模型链路.
+		v1.POST("/device/session", deps.CreateDeviceSession)
+		v1.POST("/device/chat", deps.DeviceChat)
 	}
 }
 
