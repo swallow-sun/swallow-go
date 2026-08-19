@@ -71,8 +71,8 @@ func run() (runErr error) {
 	if err != nil {
 		return fmt.Errorf("load config failed: %w", err)
 	}
-	// 2. 根据 TOML 中的运行环境初始化日志.
-	if err := logger.Init(cfg.App.Environment); err != nil {
+	// 2. 根据 TOML 中的运行环境、日志等级和目录初始化日志.
+	if err := logger.Init(logger.Options{Environment: cfg.App.Environment, Level: cfg.Log.Level, Directory: cfg.Log.Directory}); err != nil {
 		return fmt.Errorf("init logger failed: %w", err)
 	}
 	// 清空所有的日志缓存,有些日志没输出,输出出来
@@ -86,7 +86,11 @@ func run() (runErr error) {
 	// logger.AddFields 给全局 logger 加一些固定字段,之后每条日志都自动带上这些字段
 	// 这里把 startup_id 加进去,这样所有日志都带着这个启动 ID
 	logger.AddFields(zap.String("startup_id", startupID))
-	logger.Info("program starting")
+	logger.Info("program starting",
+		zap.String("environment", cfg.App.Environment),
+		zap.String("log_level", cfg.Log.Level),
+		zap.String("log_directory", cfg.Log.Directory),
+	)
 	// 遍历所有已经加载的配置文件路径,打 Debug 日志记录下来
 	// 举个例子,如果配了 config.toml + config.local.toml,这里会打两条日志
 	for _, source := range cfg.LoadedSources {

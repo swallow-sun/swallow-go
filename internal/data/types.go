@@ -60,6 +60,10 @@ const (
 	// ErrPriceNotFound 表示没找到指定供应商+模型在指定时间点的价格快照.
 	// 调用方据此决定是跳过费用估算还是报错.
 	ErrPriceNotFound = "price_snapshot_not_found"
+
+	// ErrDuplicatedKey 表示插入时违反了唯一约束(比如用户名重复).
+	// 上层据此做"冲突后重新查询"的并发安全处理,而不是直接报错.
+	ErrDuplicatedKey = "duplicated_key"
 )
 
 // Repository 是数据访问层的统一接口.
@@ -90,6 +94,10 @@ type Repository interface {
 	CreateSession(ctx context.Context, sessionID string, userID int64) (Session, error)
 	// GetSession 按会话 ID 查询会话.
 	GetSession(ctx context.Context, sessionID string) (Session, error)
+	// GetSessionForUser 按会话 ID 查询会话, 同时校验会话归属.
+	// 如果 sessionID 存在但不属于 userID, 返回 sql.ErrNoRows.
+	// 所有需要认证的接口必须用这个方法, 不能用 GetSession.
+	GetSessionForUser(ctx context.Context, sessionID string, userID int64) (Session, error)
 	// UpdateSessionActive 更新会话最后活跃时间.
 	UpdateSessionActive(ctx context.Context, sessionID string) error
 
@@ -101,6 +109,10 @@ type Repository interface {
 	GetDialogueByTraceAndRole(ctx context.Context, traceID, role string) (Dialogue, error)
 	// GetRecentDialogues 查最近 N 条对话消息,按从旧到新返回.
 	GetRecentDialogues(ctx context.Context, sessionID string, limit int) ([]Dialogue, error)
+	// GetRecentDialoguesForUser 查最近 N 条对话消息, 同时校验会话归属.
+	// 如果 sessionID 存在但不属于 userID, 返回空列表.
+	// 所有需要认证的接口必须用这个方法, 不能用 GetRecentDialogues.
+	GetRecentDialoguesForUser(ctx context.Context, sessionID string, userID int64, limit int) ([]Dialogue, error)
 
 	// BeginChatRequest 原子创建幂等请求记录,返回是否新建成功.
 	BeginChatRequest(ctx context.Context, clientMessageID, sessionID string, userID int64, traceID string) (ChatRequest, bool, error)
@@ -372,8 +384,8 @@ type EncryptedSecret struct {
 type ormUser struct {
 	// ID 自增主键
 	ID int64 `gorm:"primaryKey;autoIncrement"`
-	// Name 用户名,不允许空
-	Name string `gorm:"not null"`
+	// Name 用户名,不允许空,加唯一索引防止并发重复创建
+	Name string `gorm:"not null;uniqueIndex"`
 	// Role 角色,默认 "owner"
 	Role string `gorm:"default:owner"`
 	// VoicePrint 声纹特征,指针类型允许 NULL(没录就是 NULL)

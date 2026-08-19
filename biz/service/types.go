@@ -196,9 +196,10 @@ type HistoryResult struct {
 // 字段是小写(包外不可见), 外部通过 NewDeps 构造函数创建.
 // 小写字段意味着 biz/service 包外面不能直接改这些字段, 保证依赖组装只在 NewDeps 里做
 type Deps struct {
-	cfg  *config.Config
-	repo data.Repository
-	idm  *identity.Manager
-	mem  *memory.Store
-	llm  llm.Provider
+	cfg        *config.Config
+	repo       data.Repository
+	idm        *identity.Manager
+	mem        *memory.Store
+	llm        llm.Provider
+	ownerID    int64 // owner 用户 ID, 启动时查出并缓存, 用于 chat/history 接口的用户隔离
 }

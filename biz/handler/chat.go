@@ -10,18 +10,19 @@
 // handler 只管 HTTP 解析和 SSE 协议转换.
 package handler
 
-import (
-	"context"
-	"time"
+	import (
+		"context"
+		"time"
 
-	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/cloudwego/hertz/pkg/protocol/consts"
-	"github.com/swallow-sun/swallow-go/biz/service"
-	"github.com/swallow-sun/swallow-go/internal/metrics"
-	"github.com/swallow-sun/swallow-go/internal/trace"
-	"github.com/swallow-sun/swallow-go/pkg/logger"
-	"go.uber.org/zap"
-)
+		"github.com/cloudwego/hertz/pkg/app"
+		"github.com/swallow-sun/swallow-go/biz/service"
+		"github.com/swallow-sun/swallow-go/internal/apperror"
+		"github.com/swallow-sun/swallow-go/internal/metrics"
+		"github.com/swallow-sun/swallow-go/internal/trace"
+		"github.com/swallow-sun/swallow-go/pkg/logger"
+		"go.uber.org/zap"
+	)
+
 
 // Chat POST /api/chat
 // Chat 使用 SSE 返回流式对话.
@@ -37,6 +38,15 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 		metrics.RecordRequest(metrics.ComponentGo, "chat", status, float64(time.Since(start).Milliseconds()))
 	}()
 
+	// 认证: 校验 owner Bearer Token
+	if !d.authorizeOwner(c) {
+		status = metrics.StatusFailed
+		return
+	}
+
+	// 确保 context 里有 trace ID, 后面 Span 和所有子调用共用同一个 trace ID.
+	ctx, _ = trace.Ensure(ctx)
+
 	// 声明请求结构体, 准备接收客户端传来的 JSON.
 	// chatReq 有三个字段: session_id, client_message_id, message
 	var req chatReq
@@ -50,7 +60,7 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 		// c.JSON 写一个 JSON 响应给客户端, 第一个参数是 HTTP 状态码
 		// consts.StatusBadRequest 就是 400
 		status = metrics.StatusFailed
-		c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_request_body", "invalid request body", ""))
 		return
 	}
 
@@ -59,22 +69,24 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 	// 缺任何一个都返回 400
 	if req.SessionID == "" || req.ClientMessageID == "" || req.Message == "" {
 		status = metrics.StatusFailed
-		c.JSON(consts.StatusBadRequest, map[string]string{"error": "session_id, client_message_id and message are required"})
+		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_required_fields", "session_id, client_message_id and message are required", ""))
+		return
+	}
+	// 消息太长会撑爆 LLM 上下文窗口和数据库, 限制最大 64KB
+	if len(req.Message) > MaxMessageLength {
+		status = metrics.StatusFailed
+		writeErrorFromCtx(ctx, c, apperror.BadRequest("message_too_long", "message is too long", ""))
 		return
 	}
 	// client_message_id 太长会撑爆数据库字段, 限制最大 128 字符
 	// service.MaxClientMessageIDLength 是 service 层定义的常量
 	if len(req.ClientMessageID) > service.MaxClientMessageIDLength {
 		status = metrics.StatusFailed
-		c.JSON(consts.StatusBadRequest, map[string]string{"error": "client_message_id is too long"})
+		writeErrorFromCtx(ctx, c, apperror.BadRequest("client_message_id_too_long", "client_message_id is too long", ""))
 		return
 	}
 
-	// 确保 context 里有 trace ID, 后面 Span 和所有子调用共用同一个 trace ID.
-	// trace.Ensure 检查 context 里有没有 trace ID, 没有就生成一个塞进去.
-	ctx, _ = trace.Ensure(ctx)
-
-	// 创建根 Span: Handler 层, 记录从收到请求到响应结束的完整耗时.
+	// 确保 context 里有 trace ID 已在认证后完成, 这里创建根 Span.
 	// trace.StartSpan 从 context 里取 trace ID 和父 Span(这里没有父 Span, 是根),
 	// 把 Span 塞进 context 返回, 后面的 service 和 agent 层能通过 context 找到这个 Span 作为父.
 	ctx, span := trace.StartSpan(ctx, "handler", "POST /api/chat")
@@ -82,34 +94,30 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 	defer span.EndOK()
 
 	// 调 ChatService.Chat 启动流式对话.
+	// 传入 owner user ID, service 层用它做会话归属校验.
 	// d.chat 是 Deps 里的 ChatService 指针, 在 NewDeps 时创建好的
 	// 返回两个值:
 	//   events — 一个 channel, service 层往里面塞 ChatEvent, handler 从里面读
 	//   err — 请求还没开始就失败了(幂等冲突, Agent 创建失败等), 直接写 HTTP 错误
 	// err == nil 说明流式对话已开始, 后面从 channel 读事件转 SSE
-	events, err := d.chat.Chat(ctx, req.SessionID, req.ClientMessageID, req.Message)
+	events, err := d.chat.Chat(ctx, req.SessionID, req.ClientMessageID, req.Message, d.chat.OwnerID())
 	if err != nil {
 		// service.FromChatError 尝试把 error 转成 *ChatError
-		// 转成了说明是业务错误(幂等冲突, LLM 连接失败等), 有明确的 HTTP 状态码和错误码
+		// 转成了说明是业务错误(幂等冲突, 会话不存在等), 有明确的 HTTP 状态码和错误码
 		// 转不成(返回 nil)说明是内部错误, 走下面的 500 分支
 		if ce := service.FromChatError(err); ce != nil {
-			// 业务错误: 用 ChatError 里的 StatusCode 做 HTTP 响应码
-			// 比如 409 表示幂等冲突(同一条消息重复发)
+			// 业务错误: 用 ChatError 里的 StatusCode 做 HTTP 响应码, Code 做业务错误码
+			// 比如 403 表示会话不存在, 409 表示幂等冲突(同一条消息重复发)
 			// retryable=false 告诉客户端不要重试
 			status = metrics.StatusFailed
-			c.JSON(ce.StatusCode, map[string]any{
-				"code":      ce.Code,
-				"message":   "chat request cannot be executed again",
-				"retryable": false,
-				"trace_id":  ce.TraceID,
-			})
+			writeErrorFromCtx(ctx, c, apperror.New(ce.Code, "chat request error", ce.StatusCode, false, ce.TraceID))
 			return
 		}
 		// 不是 ChatError 就是内部错误, 打日志后统一返回 500 + 笼统信息
 		// 不把内部细节泄露给客户端, 防止暴露系统结构
 		status = metrics.StatusFailed
 		logger.Error("chat service failed", zap.Error(err))
-		c.JSON(consts.StatusInternalServerError, map[string]string{"error": "chat service failed"})
+		writeErrorFromCtx(ctx, c, apperror.Internal(""))
 		return
 	}
 

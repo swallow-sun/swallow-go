@@ -52,8 +52,23 @@ func FromChatError(err error) *ChatError {
 }
 
 // NewDeps 组装 service 层共享依赖，所有服务共用同一份实例。
+// 启动时查出 owner 用户 ID 并缓存, 用于 chat/history 接口的用户隔离.
 func NewDeps(cfg *config.Config, repo data.Repository, idm *identity.Manager, mem *memory.Store, provider llm.Provider) *Deps {
-	return &Deps{cfg: cfg, repo: repo, idm: idm, mem: mem, llm: provider}
+	// 查出 owner 用户 ID, 后续 chat/history 接口用它做会话归属校验.
+	// 如果 owner 用户不存在, LoginOrCreateUser 会自动创建一个.
+	owner, err := idm.LoginOrCreateUser(context.Background(), "owner")
+	if err != nil {
+		// owner 用户创建失败, 程序无法启动.
+		// 这里不 panic, 而是返回一个零值 ownerID, 后续请求会返回 403.
+		logger.Error("failed to init owner user for service deps", zap.Error(err))
+	}
+	return &Deps{cfg: cfg, repo: repo, idm: idm, mem: mem, llm: provider, ownerID: owner.ID}
+}
+
+// OwnerID 返回启动时缓存的 owner 用户 ID.
+// handler 层在认证通过后用这个 ID 做会话归属校验.
+func (s *ChatService) OwnerID() int64 {
+	return s.deps.ownerID
 }
 
 // NewChatService 创建一个 ChatService.
@@ -69,7 +84,7 @@ func NewChatService(deps *Deps) *ChatService {
 //   - error: 不是 nil 说明请求还没开始就失败了(幂等冲突, Agent 创建失败等), handler 直接返回 HTTP 错误.
 //
 // ctx 由 handler 传进来, service 用它检测客户端有没有断开.
-func (s *ChatService) Chat(ctx context.Context, sessionID, clientMessageID, message string) (<-chan ChatEvent, error) {
+func (s *ChatService) Chat(ctx context.Context, sessionID, clientMessageID, message string, userID int64) (<-chan ChatEvent, error) {
 	// 创建子 Span: Service 层, 记录对话业务逻辑的耗时.
 	// trace.StartSpan 从 context 里取父 Span(Handler 层的根 Span), 把自己挂上去.
 	// 返回的 ctx 里塞了当前 Span, 后面 ChatStream 调 trace.StartSpan 时能从 ctx 里找到这个 Span 作为父.
@@ -79,12 +94,13 @@ func (s *ChatService) Chat(ctx context.Context, sessionID, clientMessageID, mess
 	// defer span.EndOK() 保证无论正常返回还是中途出错都标记 Span 结束
 	defer span.EndOK()
 
-	// 拿 session_id 去数据库查, 确认这个会话确实存在.
+	// 拿 session_id 去数据库查, 同时校验会话属于当前用户.
 	// 防止客户端传了个不存在的 session_id 还往下走一堆逻辑
-	session, err := s.deps.repo.GetSession(ctx, sessionID)
+	// 也防止用户 A 操作用户 B 的会话
+	session, err := s.deps.repo.GetSessionForUser(ctx, sessionID, userID)
 	if err != nil {
-		// 会话不存在, 返回 400(客户端的错)
-		return nil, NewChatError(400, "session_not_found", "")
+		// 会话不存在或不属于该用户, 返回 403(客户端的错)
+		return nil, NewChatError(403, "session_not_found", "")
 	}
 
 	// 整轮聊天共用同一个超时上下文和 trace ID.

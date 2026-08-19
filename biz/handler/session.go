@@ -11,9 +11,12 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/swallow-sun/swallow-go/internal/apperror"
+	"github.com/swallow-sun/swallow-go/internal/trace"
 	"github.com/swallow-sun/swallow-go/pkg/logger"
 	"go.uber.org/zap"
 )
+
 
 // CreateSession POST /api/session
 // 客户端调这个接口开启一段新对话.
@@ -34,11 +37,18 @@ func (d *Deps) CreateSession(ctx context.Context, c *app.RequestContext) {
 	// &req 是取地址, 因为要往里面写数据, 得传指针
 	// JSON 格式不对或字段类型不对就返回 error
 	if err := c.BindAndValidate(&req); err != nil {
-		// 解析失败, 返回 HTTP 400 + 错误信息, return 结束函数, 不往下走
-		// c.JSON 是 Hertz 框架的方法, 把第二个参数序列化成 JSON 写进响应体
-		// consts.StatusBadRequest = 400, 表示客户端发的请求格式有问题
-		// map[string]string 是 Go 内置的 map 类型, 这里当简单的 JSON 对象用
-		c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		ctx, _ = trace.Ensure(ctx)
+		writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_request_body", "invalid request body", ""))
+		return
+	}
+
+	// 确保 context 里有 trace ID, 后面错误响应需要带
+	ctx, _ = trace.Ensure(ctx)
+
+	// 用户名长度校验: 防止超长输入撑爆数据库
+	// 空 username 是合法的(service 层会兜底填 "owner"), 只校验非空时的长度
+	if len(req.UserName) > MaxUserNameLength {
+		writeErrorFromCtx(ctx, c, apperror.BadRequest("user_name_too_long", "user_name is too long", ""))
 		return
 	}
 
@@ -49,9 +59,7 @@ func (d *Deps) CreateSession(ctx context.Context, c *app.RequestContext) {
 	if err != nil {
 		// 底层用 fmt.Errorf 往上抛, 到入口层(handler)统一打日志
 		logger.Error("session create failed", zap.String("user", req.UserName), zap.Error(err))
-		// 给客户端返回 500 + 笼统错误信息, 不把具体错误泄露出去
-		// consts.StatusInternalServerError = 500, 表示服务端内部出错
-		c.JSON(consts.StatusInternalServerError, map[string]string{"error": "session create failed"})
+		writeErrorFromCtx(ctx, c, apperror.Internal(""))
 		return
 	}
 

@@ -51,12 +51,30 @@ func Load() (*Config, error) {
 		// os.IsNotExist 判断错误是不是"文件不存在"这一种
 		return nil, fmt.Errorf("stat config.local.toml: %w", err)
 	}
+	// 旧配置没有 [log] 时补默认值，保证升级后仍能直接启动。
+	cfg.applyLogDefaults()
 	// 加载完后校验启动配置(环境,端口,数据库路径等),不合法就报错
 	if err := cfg.ValidateBootstrap(); err != nil {
 		return nil, err
 	}
 	// 返回配置指针,调用方拿着这个 cfg 就能拿到所有配置值
 	return &cfg, nil
+}
+
+// applyLogDefaults 根据运行环境补齐未显式配置的日志等级和目录。
+func (cfg *Config) applyLogDefaults() {
+	if strings.TrimSpace(cfg.Log.Directory) == "" {
+		cfg.Log.Directory = DefaultLogDirectory
+	}
+	if strings.TrimSpace(cfg.Log.Level) != "" {
+		cfg.Log.Level = strings.ToLower(strings.TrimSpace(cfg.Log.Level))
+		return
+	}
+	if cfg.App.Environment == "production" {
+		cfg.Log.Level = DefaultProductionLogLevel
+	} else {
+		cfg.Log.Level = DefaultDevelopmentLogLevel
+	}
 }
 
 // Validate 校验服务端口,LLM 地址,模型名称和数据库路径.
@@ -77,6 +95,20 @@ func (cfg Config) ValidateBootstrap() error {
 	// 运行环境只能是 development 或 production,其他值直接报错
 	if cfg.App.Environment != "development" && cfg.App.Environment != "production" {
 		return fmt.Errorf("app.environment must be development or production")
+	}
+	// 直接构造 Config 的调用方也允许省略日志配置，语义与 Load 的默认值一致。
+	logLevel := strings.ToLower(strings.TrimSpace(cfg.Log.Level))
+	if logLevel == "" {
+		if cfg.App.Environment == "production" {
+			logLevel = DefaultProductionLogLevel
+		} else {
+			logLevel = DefaultDevelopmentLogLevel
+		}
+	}
+	switch logLevel {
+	case LogLevelDebug, LogLevelInfo, LogLevelWarn, LogLevelError:
+	default:
+		return fmt.Errorf("log.level must be debug, info, warn or error")
 	}
 	// 端口号必须在 1-65535 范围内,0 和负数,超过 65535 都不行
 	if cfg.Server.Port < 1 || cfg.Server.Port > 65535 {

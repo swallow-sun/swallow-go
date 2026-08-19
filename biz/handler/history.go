@@ -11,35 +11,43 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/swallow-sun/swallow-go/internal/apperror"
+	"github.com/swallow-sun/swallow-go/internal/trace"
 	"github.com/swallow-sun/swallow-go/pkg/logger"
 	"go.uber.org/zap"
 )
 
+
 // GetHistory GET /api/history?session_id=xxx
 // 客户端在 URL 里传 session_id, 返回这个会话最近 50 条对话记录.
 func (d *Deps) GetHistory(ctx context.Context, c *app.RequestContext) {
+	// 认证: 校验 owner Bearer Token
+	if !d.authorizeOwner(c) {
+		return
+	}
+
+	// 确保 context 里有 trace ID
+	ctx, _ = trace.Ensure(ctx)
+
 	// 从 URL 查询参数里取 session_id, 比如 /api/history?session_id=abc-123
-	// c.Query 返回的是 []byte, 用 string() 转成 Go 字符串
-	// 为什么 c.Query 返回的是 []byte 而不是 string? 因为 Hertz 为了减少内存分配,
-	// 直接返回对请求缓冲区的引用, 需要 string 时自己转
 	sessionID := string(c.Query("session_id"))
 
 	// 没传 session_id, 返回 400, 告诉客户端这个参数是必填的
 	if sessionID == "" {
-		c.JSON(consts.StatusBadRequest, map[string]string{"error": "session_id is required"})
+		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_session_id", "session_id is required", ""))
 		return
 	}
 
 	// 调 HistoryService 查询对话历史.
+	// 传入 owner user ID, service 层用它做会话归属校验.
 	// d.history 是 Deps 里的 HistoryService 指针, 在 NewDeps 时创建好的.
 	// 返回两个值: result 是查询结果, err 是错误
 	// result 里包含 SessionID 和 Items(对话记录列表)
-	result, err := d.history.GetHistory(ctx, sessionID)
+	result, err := d.history.GetHistory(ctx, sessionID, d.history.OwnerID())
 	if err != nil {
 		// 打日志, 记录是哪个会话查失败了, 方便排查
 		logger.Error("query history failed", zap.String("session_id", sessionID), zap.Error(err))
-		// 返回 500 + 笼统信息, 不把数据库错误细节泄露给客户端
-		c.JSON(consts.StatusInternalServerError, map[string]string{"error": "query failed"})
+		writeErrorFromCtx(ctx, c, apperror.Internal(""))
 		return
 	}
 

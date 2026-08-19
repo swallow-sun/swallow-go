@@ -8,18 +8,21 @@
 // 方案 15.7 节: 看板由 Go 服务端提供只读聚合接口, 不允许前端直接连数据库.
 package handler
 
-import (
-	"context"
-	"crypto/subtle"
-	"errors"
-	"strings"
+	import (
+		"context"
+		"crypto/subtle"
+		"errors"
+		"strings"
 
-	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/cloudwego/hertz/pkg/protocol/consts"
-	"github.com/swallow-sun/swallow-go/biz/service"
-	"github.com/swallow-sun/swallow-go/pkg/logger"
-	"go.uber.org/zap"
-)
+		"github.com/cloudwego/hertz/pkg/app"
+		"github.com/cloudwego/hertz/pkg/protocol/consts"
+		"github.com/swallow-sun/swallow-go/biz/service"
+		"github.com/swallow-sun/swallow-go/internal/apperror"
+		"github.com/swallow-sun/swallow-go/internal/trace"
+		"github.com/swallow-sun/swallow-go/pkg/logger"
+		"go.uber.org/zap"
+	)
+
 
 // GetModelUsage GET /api/v1/dashboard/model-usage?from=YYYY-MM-DD&to=YYYY-MM-DD
 // 客户端在 URL 里传 from 和 to 两个日期参数, 返回这个日期范围内的模型用量日聚合数据.
@@ -27,6 +30,7 @@ func (d *Deps) GetModelUsage(ctx context.Context, c *app.RequestContext) {
 	if !d.authorizeOwner(c) {
 		return
 	}
+	ctx, _ = trace.Ensure(ctx)
 	// 从 URL 查询参数里取 from 和 to, 比如 ?from=2026-08-01&to=2026-08-18
 	// c.Query 返回 []byte, 用 string() 转成 Go 字符串
 	dateFrom := string(c.Query("from"))
@@ -34,7 +38,7 @@ func (d *Deps) GetModelUsage(ctx context.Context, c *app.RequestContext) {
 
 	// 没传日期参数, 返回 400, 告诉客户端这两个参数是必填的
 	if dateFrom == "" || dateTo == "" {
-		c.JSON(consts.StatusBadRequest, map[string]string{"error": "from and to are required"})
+		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_date_params", "from and to are required", ""))
 		return
 	}
 
@@ -46,7 +50,7 @@ func (d *Deps) GetModelUsage(ctx context.Context, c *app.RequestContext) {
 	if err != nil {
 		var validationErr *service.DashboardValidationError
 		if errors.As(err, &validationErr) {
-			c.JSON(consts.StatusBadRequest, map[string]string{"error": validationErr.Error()})
+			writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_date_range", validationErr.Error(), ""))
 			return
 		}
 		// 打日志, 记录是哪个日期范围查失败了, 方便排查
@@ -56,7 +60,7 @@ func (d *Deps) GetModelUsage(ctx context.Context, c *app.RequestContext) {
 			zap.Error(err),
 		)
 		// 返回 500 + 笼统信息, 不把数据库错误细节泄露给客户端
-		c.JSON(consts.StatusInternalServerError, map[string]string{"error": "query failed"})
+		writeErrorFromCtx(ctx, c, apperror.Internal(""))
 		return
 	}
 
@@ -70,14 +74,14 @@ func (d *Deps) authorizeOwner(c *app.RequestContext) bool {
 	ownerToken := d.dashboard.OwnerToken()
 	if ownerToken == "" {
 		logger.Error("owner token is not configured")
-		c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "owner authentication is not configured"})
+		writeError(c, apperror.ServiceUnavailable("owner authentication is not configured", ""))
 		return false
 	}
 	provided := strings.TrimSpace(string(c.GetHeader("Authorization")))
 	expected := "Bearer " + ownerToken
 	if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
 		logger.Warn("owner authentication failed")
-		c.JSON(consts.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		writeError(c, apperror.Unauthorized(""))
 		return false
 	}
 	return true

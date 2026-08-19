@@ -14,6 +14,12 @@ const (
 	EnvironmentProduction = "production"
 	// MaxDebugSQLLength 限制开发环境单条 SQL 日志长度，防止异常语句撑爆日志文件。
 	MaxDebugSQLLength = 4096
+	// LogDirectory 是本地日志文件的固定目录，相对于程序工作目录。
+	LogDirectory = "logs"
+	// LogFileDateLayout 用日期拆分日志文件，避免所有历史日志写入同一个文件。
+	LogFileDateLayout = "2006-01-02"
+	// LogFilePrefix 是日志文件名前缀，最终文件名如 swallow-2026-08-19.log。
+	LogFilePrefix = "swallow-"
 )
 
 // HertzAdapter 把 Hertz 框架日志转发到项目唯一的全局 logger.
@@ -26,3 +32,10 @@ type HertzAdapter struct {
 
 // gormLogger 把 GORM 内部日志安全转发到项目 logger。
 type gormLogger struct{}
+
+// Options 是日志初始化参数，由 TOML 的 app 和 log 配置组装。
+type Options struct {
+	Environment string // development 或 production，控制敏感 SQL 是否允许输出
+	Level       string // debug、info、warn 或 error
+	Directory   string // 本地日志文件目录
+}

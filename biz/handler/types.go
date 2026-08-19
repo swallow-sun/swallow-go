@@ -10,6 +10,20 @@ import (
 	"github.com/swallow-sun/swallow-go/biz/service"
 )
 
+// 输入限制常量.
+// 在 handler 层入口校验, 防止超长输入撑爆数据库或消耗过多内存.
+const (
+	// MaxUserNameLength 用户名最大长度(字节).
+	// 用户名一般不超过 64 字符, 64*4(UTF-8 最长 4 字节/字符) = 256 字节足够.
+	MaxUserNameLength = 256
+	// MaxMessageLength 用户消息最大长度(字节).
+	// 单轮对话一般不超过 32KB 文本, 留余量设为 64KB.
+	MaxMessageLength = 64 * 1024
+	// MaxRequestBodySize HTTP 请求体最大尺寸(字节).
+	// 默认 1MB, 足够覆盖消息+元数据, 防止恶意大包.
+	MaxRequestBodySize = 1024 * 1024
+)
+
 // Deps 是 handler 层的依赖集合, 持有五个 Service.
 // handler 通过 Service 间接访问数据层, 跟 HTTP 解析和业务逻辑分开.
 // Deps 在程序启动时由 main.go 构造, 所有 handler 方法都挂在 *Deps 上.

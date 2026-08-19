@@ -17,13 +17,20 @@ func NewHistoryService(deps *Deps) *HistoryService {
 	return &HistoryService{deps: deps}
 }
 
+// OwnerID 返回启动时缓存的 owner 用户 ID.
+// handler 层在认证通过后用这个 ID 做会话归属校验.
+func (s *HistoryService) OwnerID() int64 {
+	return s.deps.ownerID
+}
+
 // GetHistory 查询指定会话的最近 N 条对话记录.
 // sessionID 为空时返回错误(handler 在 HTTP 层已校验, 这里兜底).
 // 返回 HistoryResult, handler 直接转成 JSON 响应.
-func (s *HistoryService) GetHistory(ctx context.Context, sessionID string) (HistoryResult, error) {
+func (s *HistoryService) GetHistory(ctx context.Context, sessionID string, userID int64) (HistoryResult, error) {
 	// 从数据库查这个会话最近 50 条对话记录.
-	// s.deps.repo 是底层的数据仓库, GetRecentDialogues 按时间倒序查
-	dialogues, err := s.deps.repo.GetRecentDialogues(ctx, sessionID, HistoryResultLimit)
+	// 用 GetRecentDialoguesForUser 校验会话归属, 防止用户 A 读取用户 B 的对话.
+	// s.deps.repo 是底层的数据仓库, GetRecentDialoguesForUser 按时间倒序查
+	dialogues, err := s.deps.repo.GetRecentDialoguesForUser(ctx, sessionID, userID, HistoryResultLimit)
 	if err != nil {
 		return HistoryResult{}, fmt.Errorf("failed to query history: %w", err)
 	}

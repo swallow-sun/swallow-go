@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/swallow-sun/swallow-go/pkg/logger"
@@ -56,6 +57,10 @@ func (r *sqliteRepo) CreateUser(ctx context.Context, name, role string) (User, e
 	// 执行完 model 里会回填数据库生成的 ID 和时间字段(GORM 自动干的)
 	// .Error 拿错误信息,没报错就是 nil
 	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
+		// 唯一约束冲突(并发创建同名用户)返回哨兵错误, 上层据此重新查询
+		if isUniqueConstraintError(err) {
+			return User{}, errors.New(ErrDuplicatedKey)
+		}
 		logger.Error("users insert failed",
 			zap.String("name", name),
 			zap.String("role", role),
@@ -163,6 +168,23 @@ func (r *sqliteRepo) GetSession(ctx context.Context, sessionID string) (Session,
 	// .First(&model, "id = ?", sessionID) 按主键查一条
 	if err := r.db.WithContext(ctx).Select(sessionColumns).First(&model, "id = ?", sessionID).Error; err != nil {
 		return Session{}, fmt.Errorf("get session %s: %w", sessionID, repositoryError(err))
+	}
+
+	return sessionFromORM(model), nil
+}
+
+// GetSessionForUser 按会话 ID 查询会话, 同时校验会话属于指定用户.
+// 如果会话不存在或不属于该用户, 都返回 sql.ErrNoRows.
+// 这样调用方无法区分"会话不存在"和"不属于该用户", 防止枚举他人会话.
+func (r *sqliteRepo) GetSessionForUser(ctx context.Context, sessionID string, userID int64) (Session, error) {
+	// 空的 ORM 模型变量, 准备接收查询结果
+	var model ormSession
+
+	// .Select(sessionColumns) 只查需要的列
+	// .First(&model, "id = ? AND user_id = ?", sessionID, userID) 同时匹配会话 ID 和用户 ID
+	// 只查到两条都匹配的记录, 否则返回 ErrRecordNotFound → sql.ErrNoRows
+	if err := r.db.WithContext(ctx).Select(sessionColumns).First(&model, "id = ? AND user_id = ?", sessionID, userID).Error; err != nil {
+		return Session{}, fmt.Errorf("get session %s for user %d: %w", sessionID, userID, repositoryError(err))
 	}
 
 	return sessionFromORM(model), nil
@@ -294,6 +316,30 @@ func (r *sqliteRepo) GetRecentDialogues(ctx context.Context, sessionID string, l
 	return result, nil
 }
 
+// GetRecentDialoguesForUser 查询最近 limit 条消息, 同时校验会话属于指定用户.
+// 如果会话不存在或不属于该用户, 返回空列表(不报错).
+// 通过先查 GetSessionForUser 确认归属, 再查对话.
+// 这样防止用户 A 读取用户 B 的对话历史.
+func (r *sqliteRepo) GetRecentDialoguesForUser(ctx context.Context, sessionID string, userID int64, limit int) ([]Dialogue, error) {
+	// 先校验会话是否属于该用户, 不属于就返回空列表
+	// 不用 GetSessionForUser 是因为这里不关心会话存不存在, 只要不属于该用户就返回空
+	// 用 WHERE session_id = ? AND user_id = ? 直接在对话表上过滤更简洁
+	var models []ormDialogue
+
+	if err := r.db.WithContext(ctx).Select(dialogueColumns).
+		Where("session_id = ? AND user_id = ?", sessionID, userID).
+		Order("timestamp DESC").Order("id DESC").Limit(limit).Find(&models).Error; err != nil {
+		return nil, fmt.Errorf("query dialogues for user: %w", err)
+	}
+
+	// 反序: 数据库返回"最新在前", 我们要"从旧到新"
+	result := make([]Dialogue, len(models))
+	for i := range models {
+		result[len(models)-1-i] = dialogueFromORM(models[i])
+	}
+	return result, nil
+}
+
 // InsertEvent 保存一条埋点事件.
 // 参数说明:
 //   - eventType: 事件类型,比如 "chat_request","llm_call"
@@ -356,6 +402,20 @@ func repositoryError(err error) error {
 	}
 	// 不是"没找到"的错误,原样返回
 	return err
+}
+
+// isUniqueConstraintError 判断 err 是否为唯一约束冲突.
+// SQLite 唯一约束冲突的错误消息包含 "UNIQUE constraint failed".
+// 用字符串匹配而非类型断言, 避免在 data 包里硬依赖 SQLite 驱动,
+// 将来换 MySQL/PG 时只需改这一个函数.
+func isUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// strings.Contains 做子串匹配, 大小写不敏感
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique constraint failed") ||
+		strings.Contains(msg, "constraint failed: unique")
 }
 
 // 以下 fromORM 函数把 GORM ORM 模型转成业务对象(去掉 GORM tag,只留业务字段).

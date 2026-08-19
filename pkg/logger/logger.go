@@ -1,7 +1,7 @@
 // logger.go 放项目统一的结构化日志入口.
 //
 // 做的事情:
-//  1. Init:初始化全局 zap.Logger,开发和生产环境都用 JSON 格式输出到 os.Stdout.
+//  1. Init:初始化全局 zap.Logger,同时输出到控制台和 logs 日期文件.
 //  2. Info/Warn/Error/Debug:封装 zap.Logger 的同名方法,业务代码通过本包记录日志.
 //  3. Sync:刷新日志缓冲区,入口程序退出前应调用.
 //  4. AddFields:为当前进程后续日志附加公共字段(如 startup_id).
@@ -10,7 +10,10 @@
 package logger
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -20,22 +23,51 @@ import (
 // 全局变量,所有包通过 Info/Warn/Error/Debug 这些函数间接访问它.
 var global *zap.Logger
 
+// logFile 是当前进程持有的本地日志文件，Sync 时刷新并关闭。
+var logFile *os.File
+
 // environment 保存从 TOML 读取的当前运行环境,用于控制日志格式和最低级别.
 // 默认是开发模式 "development".
 var environment = EnvironmentDevelopment
 
-// Init 初始化全局 logger.
-// environments 是可选参数,传 "production" 就用生产模式,不传或传空就用开发模式.
-// 开发和生产环境都用 JSON 格式输出,区别只有级别:开发 Debug 起步,生产 Info 起步.
-func Init(environments ...string) error {
-	// environments 是可变参数(...string),外面调用可以传也可以不传
-	// 如果传了且第一个参数不是空串,就用它作为运行环境
-	if len(environments) > 0 && environments[0] != "" {
-		environment = environments[0]
-	} else {
-		// 没传就默认用开发模式
-		environment = EnvironmentDevelopment
+// Init 初始化全局 logger；不传参数时使用开发环境、Debug 和 logs 目录。
+// 开发和生产环境都以 JSON 同时输出到控制台和配置目录下的日期日志文件。
+func Init(options ...Options) error {
+	opt := Options{Environment: EnvironmentDevelopment, Level: "debug", Directory: LogDirectory}
+	if len(options) > 0 {
+		if options[0].Environment != "" {
+			opt.Environment = options[0].Environment
+		}
+		if options[0].Level != "" {
+			opt.Level = options[0].Level
+		}
+		if options[0].Directory != "" {
+			opt.Directory = options[0].Directory
+		}
 	}
+	environment = opt.Environment
+	var level zapcore.Level
+	if err := level.UnmarshalText([]byte(opt.Level)); err != nil {
+		return fmt.Errorf("parse log level %q: %w", opt.Level, err)
+	}
+
+	// 重复初始化时先刷新并关闭旧文件，避免测试或多入口初始化造成文件句柄泄漏。
+	if logFile != nil {
+		_ = logFile.Sync()
+		_ = logFile.Close()
+		logFile = nil
+	}
+
+	// logs 目录不存在时自动创建；创建失败直接终止启动，避免误以为日志已经持久化。
+	if err := os.MkdirAll(opt.Directory, 0o755); err != nil {
+		return fmt.Errorf("create log directory %s: %w", opt.Directory, err)
+	}
+	logPath := filepath.Join(opt.Directory, LogFilePrefix+time.Now().Format(LogFileDateLayout)+".log")
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open log file %s: %w", logPath, err)
+	}
+	logFile = file
 
 	// 编码器配置:用 JSON 格式,方便机器解析,开发和生产统一
 	encoderConfig := zap.NewProductionEncoderConfig()
@@ -43,16 +75,10 @@ func Init(environments ...string) error {
 	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	encoder := zapcore.NewJSONEncoder(encoderConfig)
 
-	// 级别:开发环境 Debug 起步(全量输出),生产环境 Info 起步(过滤 Debug)
-	var level zapcore.Level
-	if IsProduction() {
-		level = zap.InfoLevel
-	} else {
-		level = zap.DebugLevel
-	}
-
-	// core = JSON 编码器 + os.Stdout 输出 + 级别过滤
-	core := zapcore.NewCore(encoder, zapcore.Lock(os.Stdout), level)
+	// 控制台和本地文件使用相同 JSON、级别和结构化字段，方便直接检索 startup_id/trace_id。
+	consoleCore := zapcore.NewCore(encoder, zapcore.Lock(os.Stdout), level)
+	fileCore := zapcore.NewCore(encoder.Clone(), zapcore.AddSync(logFile), level)
+	core := zapcore.NewTee(consoleCore, fileCore)
 
 	// zap.AddCallerSkip(1) 让 caller 往上跳一层,跳过 logger.Info/Warn/Error 封装函数,
 	// 记录真正调用日志的业务代码的文件名和行号.
@@ -91,8 +117,20 @@ func Sync() error {
 		// logger 还没初始化,没什么可 Sync 的,直接返回 nil
 		return nil
 	}
-	// global.Sync() 是 zap.Logger 的方法,把缓冲区里的日志刷到输出目标
-	return global.Sync()
+	// 先刷新 zap 的控制台和文件 Core，再关闭文件句柄。
+	syncErr := global.Sync()
+	if logFile == nil {
+		return syncErr
+	}
+	closeErr := logFile.Close()
+	logFile = nil
+	if syncErr != nil {
+		return syncErr
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close log file: %w", closeErr)
+	}
+	return nil
 }
 
 // AddFields 为当前进程后续日志附加公共字段,例如 startup_id.

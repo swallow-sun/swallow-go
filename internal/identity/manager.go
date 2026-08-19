@@ -67,6 +67,19 @@ func (m *Manager) LoginOrCreateUser(ctx context.Context, name string) (data.User
 	// 调 repo 创建用户,角色固定为 "owner"(项目负责人)
 	user, err = m.repo.CreateUser(ctx, name, "owner")
 	if err != nil {
+		// 并发场景: 两个请求同时创建同名用户, 唯一索引让第二个 INSERT 失败.
+		// 此时不是真正的错误, 只是另一个请求先建好了, 重新查一次即可.
+		if err.Error() == data.ErrDuplicatedKey {
+			user, err = m.repo.GetUserByName(ctx, name)
+			if err != nil {
+				return data.User{}, fmt.Errorf("find user %q after conflict: %w", name, err)
+			}
+			logger.Debug("user created by concurrent request, re-fetched",
+				zap.String("user", name),
+				zap.Int64("user_id", user.ID),
+			)
+			return user, nil
+		}
 		// 创建失败,包一层错误往上抛
 		return data.User{}, fmt.Errorf("create user %q: %w", name, err)
 	}
