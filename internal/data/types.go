@@ -21,6 +21,11 @@ import (
 type SpanSinkAdapter struct{ Repo Repository }
 
 const (
+	// SessionStatusActive 表示会话可以继续接收消息。
+	SessionStatusActive = "active"
+	// SessionStatusClosed 表示会话已经关闭，不应再接收新消息。
+	SessionStatusClosed = "closed"
+
 	// MigrationStatusRunning 表示迁移已经登记,正在执行.
 	// 迁移开始时先插一条 running 记录,执行完再更新成 completed 或 failed.
 	MigrationStatusRunning = "running"

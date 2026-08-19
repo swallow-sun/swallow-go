@@ -17,7 +17,6 @@ import (
 	"go.uber.org/zap"
 )
 
-
 // GetHistory GET /api/history?session_id=xxx
 // 客户端在 URL 里传 session_id, 返回这个会话最近 50 条对话记录.
 func (d *Deps) GetHistory(ctx context.Context, c *app.RequestContext) {
@@ -34,7 +33,7 @@ func (d *Deps) GetHistory(ctx context.Context, c *app.RequestContext) {
 
 	// 没传 session_id, 返回 400, 告诉客户端这个参数是必填的
 	if sessionID == "" {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_session_id", "session_id is required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMissingSessionID, "session_id is required", ""))
 		return
 	}
 
@@ -70,6 +69,6 @@ func (d *Deps) GetHistory(ctx context.Context, c *app.RequestContext) {
 	// historyResp 会被 c.JSON 序列化成 JSON 发给客户端.
 	c.JSON(consts.StatusOK, historyResp{
 		SessionID: result.SessionID, // 哪个会话的历史
-		Items:     items,             // 对话记录列表, 按时间正序排列
+		Items:     items,            // 对话记录列表, 按时间正序排列
 	})
 }

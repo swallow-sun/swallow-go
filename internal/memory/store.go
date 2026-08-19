@@ -3,6 +3,8 @@
 // 做的事情:
 //  1. SaveMessage:把一条用户或助手消息写入 dialogues 表,记录 trace ID 和 token 用量,同时打埋点.
 //  2. LoadHistory:从数据库加载最近 N 条对话,转成 LLM 用的 ChatMessage 切片(跳过 system 角色).
+//  3. SearchLongTerm:检索用户已经确认的 active 长期记忆.
+//  4. CreateCandidates:对话成功后按确定性规则生成 pending 记忆候选.
 //
 // Phase 2:对话存 SQLite,每轮对话后写入,启动时从 DB 加载历史.
 // 取代 Phase 1 的 Agent 内存 slice——数据存进数据库后重启不丢.
@@ -177,10 +179,10 @@ func (s *Store) LoadHistory(
 	// 查询成功了,记一个埋点:返回了几条,花了多久
 	telemetry.Emit(ctx, telemetry.EventMemoryQuery, map[string]any{
 		"session_id":              sessionID,
-			"limit":                   limit,
-			"rows_returned":           len(messages),
-			telemetry.FieldStatus:     telemetry.StatusOK,
-			telemetry.FieldDurationMS: elapsed.Milliseconds(),
+		"limit":                   limit,
+		"rows_returned":           len(messages),
+		telemetry.FieldStatus:     telemetry.StatusOK,
+		telemetry.FieldDurationMS: elapsed.Milliseconds(),
 	})
 
 	// Prometheus 指标:记忆查询成功,计数器 +1,耗时直方图记录
@@ -188,4 +190,25 @@ func (s *Store) LoadHistory(
 
 	// 返回转换好的消息切片
 	return messages, nil
+}
+
+// SearchLongTerm 检索用户已经确认的正式长期记忆。
+// 第一轮使用用户原问题检索；没有精确结果时回退到最近更新的 active 记忆。
+func (s *Store) SearchLongTerm(ctx context.Context, userID int64, query string, limit int) (SearchResult, error) {
+	retriever := NewRetriever(s.repo)
+	result, err := retriever.Search(ctx, userID, query, limit)
+	if err != nil {
+		return SearchResult{}, err
+	}
+	if result.Returned > 0 || query == "" {
+		return result, nil
+	}
+	return retriever.Search(ctx, userID, "", limit)
+}
+
+// CreateCandidates 在完整一轮对话成功保存后生成 pending 长期记忆候选。
+// 候选必须由用户通过确认接口处理，本方法不会直接写入正式 memories 表。
+func (s *Store) CreateCandidates(ctx context.Context, userID int64, sessionID, userMessage string) ([]data.MemoryCandidate, error) {
+	service := NewCandidateService(s.repo, NewPolicy())
+	return service.CreateCandidates(ctx, userID, sessionID, userMessage)
 }

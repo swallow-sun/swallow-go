@@ -75,7 +75,7 @@ func (s *Retriever) Search(
 		// 查询失败也要发埋点, 方便看板统计错误率
 		telemetry.Emit(ctx, telemetry.EventMemoryQuery, map[string]any{
 			"user_id":                 userID,
-			"keywords":                keywords,
+			"query_chars":             len([]rune(keywords)),
 			"limit":                   limit,
 			"trace_id":                traceID,
 			telemetry.FieldStatus:     telemetry.StatusError,
@@ -93,7 +93,7 @@ func (s *Retriever) Search(
 	// 方案 16.11.4 节: "memory_query 事件包含限制数, 返回数, 状态和耗时"
 	telemetry.Emit(ctx, telemetry.EventMemoryQuery, map[string]any{
 		"user_id":                 userID,
-		"keywords":                keywords,
+		"query_chars":             len([]rune(keywords)),
 		"limit":                   limit,
 		"rows_returned":           len(rows),
 		"trace_id":                traceID,
@@ -106,7 +106,7 @@ func (s *Retriever) Search(
 
 	logger.Debug("memory search completed",
 		zap.Int64("user_id", userID),
-		zap.String("keywords", keywords),
+		zap.Int("query_chars", len([]rune(keywords))),
 		zap.Int("limit", limit),
 		zap.Int("returned", len(rows)),
 		zap.Int64("duration_ms", elapsed.Milliseconds()),

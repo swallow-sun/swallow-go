@@ -17,7 +17,6 @@ import (
 	"go.uber.org/zap"
 )
 
-
 // CreateSession POST /api/session
 // 客户端调这个接口开启一段新对话.
 // 流程: 解析 HTTP 请求 → 调 SessionService.CreateSession → 把结果写成 JSON 返回.
@@ -26,7 +25,7 @@ import (
 //   - d: *Deps 指针, 持有三个 Service, d.session 就是会话服务
 //   - ctx: 上下文, 能传递超时和取消信号
 //   - c: Hertz 的请求上下文 *app.RequestContext, 每个 HTTP 请求对应一个,
-//       能读请求体, 写响应, 操作 HTTP 头
+//     能读请求体, 写响应, 操作 HTTP 头
 func (d *Deps) CreateSession(ctx context.Context, c *app.RequestContext) {
 	// 声明一个空的结构体变量, 准备接收客户端传来的 JSON
 	var req createSessionReq
@@ -38,7 +37,7 @@ func (d *Deps) CreateSession(ctx context.Context, c *app.RequestContext) {
 	// JSON 格式不对或字段类型不对就返回 error
 	if err := c.BindAndValidate(&req); err != nil {
 		ctx, _ = trace.Ensure(ctx)
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_request_body", "invalid request body", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeInvalidRequestBody, "invalid request body", ""))
 		return
 	}
 
@@ -48,7 +47,7 @@ func (d *Deps) CreateSession(ctx context.Context, c *app.RequestContext) {
 	// 用户名长度校验: 防止超长输入撑爆数据库
 	// 空 username 是合法的(service 层会兜底填 "owner"), 只校验非空时的长度
 	if len(req.UserName) > MaxUserNameLength {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("user_name_too_long", "user_name is too long", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeUserNameTooLong, "user_name is too long", ""))
 		return
 	}
 

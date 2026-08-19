@@ -10,19 +10,18 @@
 // handler 只管 HTTP 解析和 SSE 协议转换.
 package handler
 
-	import (
-		"context"
-		"time"
+import (
+	"context"
+	"time"
 
-		"github.com/cloudwego/hertz/pkg/app"
-		"github.com/swallow-sun/swallow-go/biz/service"
-		"github.com/swallow-sun/swallow-go/internal/apperror"
-		"github.com/swallow-sun/swallow-go/internal/metrics"
-		"github.com/swallow-sun/swallow-go/internal/trace"
-		"github.com/swallow-sun/swallow-go/pkg/logger"
-		"go.uber.org/zap"
-	)
-
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/swallow-sun/swallow-go/biz/service"
+	"github.com/swallow-sun/swallow-go/internal/apperror"
+	"github.com/swallow-sun/swallow-go/internal/metrics"
+	"github.com/swallow-sun/swallow-go/internal/trace"
+	"github.com/swallow-sun/swallow-go/pkg/logger"
+	"go.uber.org/zap"
+)
 
 // Chat POST /api/chat
 // Chat 使用 SSE 返回流式对话.
@@ -51,7 +50,7 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 	// chatReq 有三个字段: session_id, client_message_id, message
 	var req chatReq
 
-// c.BindAndValidate 做两件事:
+	// c.BindAndValidate 做两件事:
 	//  1. 把请求体里的 JSON 解析到 req 里(反序列化)
 	//  2. 调 req 的校验方法(如果有的话)做参数校验
 	// &req 是取地址, 因为 BindAndValidate 要往里面写数据
@@ -60,7 +59,7 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 		// c.JSON 写一个 JSON 响应给客户端, 第一个参数是 HTTP 状态码
 		// consts.StatusBadRequest 就是 400
 		status = metrics.StatusFailed
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_request_body", "invalid request body", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeInvalidRequestBody, "invalid request body", ""))
 		return
 	}
 
@@ -69,20 +68,20 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 	// 缺任何一个都返回 400
 	if req.SessionID == "" || req.ClientMessageID == "" || req.Message == "" {
 		status = metrics.StatusFailed
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_required_fields", "session_id, client_message_id and message are required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMissingRequiredFields, "session_id, client_message_id and message are required", ""))
 		return
 	}
 	// 消息太长会撑爆 LLM 上下文窗口和数据库, 限制最大 64KB
 	if len(req.Message) > MaxMessageLength {
 		status = metrics.StatusFailed
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("message_too_long", "message is too long", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMessageTooLong, "message is too long", ""))
 		return
 	}
 	// client_message_id 太长会撑爆数据库字段, 限制最大 128 字符
 	// service.MaxClientMessageIDLength 是 service 层定义的常量
 	if len(req.ClientMessageID) > service.MaxClientMessageIDLength {
 		status = metrics.StatusFailed
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("client_message_id_too_long", "client_message_id is too long", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeClientMessageIDTooLong, "client_message_id is too long", ""))
 		return
 	}
 
@@ -172,14 +171,14 @@ func (d *Deps) Chat(ctx context.Context, c *app.RequestContext) {
 			if event.Usage != nil {
 				// 把 UsageData 的每个字段放进 map, 后面 writeSSE 会转成 JSON
 				data := map[string]any{
-					"prompt_tokens":     event.Usage.PromptTokens,   // 输入 token 数
+					"prompt_tokens":     event.Usage.PromptTokens,     // 输入 token 数
 					"completion_tokens": event.Usage.CompletionTokens, // 输出 token 数
 					"cache_hit_tokens":  event.Usage.CacheHitTokens,   // 缓存命中的 token 数
-					"cache_miss_tokens": event.Usage.CacheMissTokens,   // 缓存未命中的 token 数
-					"reasoning_tokens":  event.Usage.ReasoningTokens,   // 推理 token 数(思维链)
-					"total_tokens":      event.Usage.TotalTokens,       // 总 token 数
-					"first_token_ms":    event.Usage.FirstTokenMs,      // 首 token 耗时(毫秒)
-					"total_duration_ms": event.Usage.TotalDurationMs,    // 总耗时(毫秒)
+					"cache_miss_tokens": event.Usage.CacheMissTokens,  // 缓存未命中的 token 数
+					"reasoning_tokens":  event.Usage.ReasoningTokens,  // 推理 token 数(思维链)
+					"total_tokens":      event.Usage.TotalTokens,      // 总 token 数
+					"first_token_ms":    event.Usage.FirstTokenMs,     // 首 token 耗时(毫秒)
+					"total_duration_ms": event.Usage.TotalDurationMs,  // 总耗时(毫秒)
 				}
 				// 重放时也要标记
 				if event.Replayed {

@@ -24,6 +24,15 @@ const (
 	MaxRequestBodySize = 1024 * 1024
 )
 
+// HTTP 成功响应中的业务状态常量.
+// 状态值会返回给客户端, 客户端根据它判断操作结果.
+const (
+	// ResponseStatusRejected 表示记忆候选已被用户拒绝.
+	ResponseStatusRejected = "rejected"
+	// ResponseStatusDeleted 表示正式记忆已被软删除.
+	ResponseStatusDeleted = "deleted"
+)
+
 // Deps 是 handler 层的依赖集合, 持有五个 Service.
 // handler 通过 Service 间接访问数据层, 跟 HTTP 解析和业务逻辑分开.
 // Deps 在程序启动时由 main.go 构造, 所有 handler 方法都挂在 *Deps 上.

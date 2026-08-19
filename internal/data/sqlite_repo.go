@@ -138,7 +138,7 @@ func (r *sqliteRepo) UpdateUserActive(ctx context.Context, id int64) error {
 func (r *sqliteRepo) CreateSession(ctx context.Context, sessionID string, userID int64) (Session, error) {
 	// 构造 ORM 模型:ID 用传进来的 sessionID,UserID 用传进来的用户 ID
 	// Status 设成 "active"(虽然表定义里有默认值,这里显式写更稳)
-	model := ormSession{ID: sessionID, UserID: userID, Status: "active"}
+	model := ormSession{ID: sessionID, UserID: userID, Status: SessionStatusActive}
 
 	// .Create(&model) 执行 INSERT INTO sessions (id, user_id, status) VALUES (?, ?, ?)
 	// 执行完 GORM 自动回填 StartedAt,LastActiveAt(因为 tag 里写了 autoCreateTime)

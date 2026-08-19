@@ -10,6 +10,17 @@ import (
 	"time"
 )
 
+// Span 结束状态常量.
+// 写入 spans 表和日志时统一使用这些常量, 调用方不直接传状态字符串.
+const (
+	// SpanStatusOK 表示调用正常完成.
+	SpanStatusOK = "ok"
+	// SpanStatusError 表示调用因为错误结束.
+	SpanStatusError = "error"
+	// SpanStatusCancelled 表示调用被主动取消.
+	SpanStatusCancelled = "cancelled"
+)
+
 // traceKey 是 trace ID 在 context.Context 中使用的私有键类型.
 type traceKey struct{}
 

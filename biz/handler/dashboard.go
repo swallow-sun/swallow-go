@@ -8,21 +8,20 @@
 // 方案 15.7 节: 看板由 Go 服务端提供只读聚合接口, 不允许前端直接连数据库.
 package handler
 
-	import (
-		"context"
-		"crypto/subtle"
-		"errors"
-		"strings"
+import (
+	"context"
+	"crypto/subtle"
+	"errors"
+	"strings"
 
-		"github.com/cloudwego/hertz/pkg/app"
-		"github.com/cloudwego/hertz/pkg/protocol/consts"
-		"github.com/swallow-sun/swallow-go/biz/service"
-		"github.com/swallow-sun/swallow-go/internal/apperror"
-		"github.com/swallow-sun/swallow-go/internal/trace"
-		"github.com/swallow-sun/swallow-go/pkg/logger"
-		"go.uber.org/zap"
-	)
-
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/swallow-sun/swallow-go/biz/service"
+	"github.com/swallow-sun/swallow-go/internal/apperror"
+	"github.com/swallow-sun/swallow-go/internal/trace"
+	"github.com/swallow-sun/swallow-go/pkg/logger"
+	"go.uber.org/zap"
+)
 
 // GetModelUsage GET /api/v1/dashboard/model-usage?from=YYYY-MM-DD&to=YYYY-MM-DD
 // 客户端在 URL 里传 from 和 to 两个日期参数, 返回这个日期范围内的模型用量日聚合数据.
@@ -38,7 +37,7 @@ func (d *Deps) GetModelUsage(ctx context.Context, c *app.RequestContext) {
 
 	// 没传日期参数, 返回 400, 告诉客户端这两个参数是必填的
 	if dateFrom == "" || dateTo == "" {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_date_params", "from and to are required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMissingDateParams, "from and to are required", ""))
 		return
 	}
 
@@ -50,7 +49,7 @@ func (d *Deps) GetModelUsage(ctx context.Context, c *app.RequestContext) {
 	if err != nil {
 		var validationErr *service.DashboardValidationError
 		if errors.As(err, &validationErr) {
-			writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_date_range", validationErr.Error(), ""))
+			writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeInvalidDateRange, validationErr.Error(), ""))
 			return
 		}
 		// 打日志, 记录是哪个日期范围查失败了, 方便排查

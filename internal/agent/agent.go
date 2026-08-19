@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/swallow-sun/swallow-go/internal/memory"
@@ -94,10 +95,10 @@ func NewWithDB(provider llm.Provider, providerName, model, systemPromptPath stri
 }
 
 // loadMessages 拼装发给 LLM 的完整 messages:
-// [system prompt] + [最近 N 条历史对话]
+// [system prompt + 长期记忆安全规则] + [已确认长期记忆参考] + [最近 N 条历史对话]
 // 无 DB 模式直接返回内存 slice.
 // 返回值:消息列表,错误
-func (a *Agent) loadMessages(ctx context.Context) ([]llm.ChatMessage, error) {
+func (a *Agent) loadMessages(ctx context.Context, userInput string) ([]llm.ChatMessage, error) {
 	// 无 DB 模式:直接返回内存里的消息切片
 	// mem == nil 说明没用 DB,历史只在 memMsgs 这个内存切片里
 	if a.mem == nil {
@@ -113,7 +114,28 @@ func (a *Agent) loadMessages(ctx context.Context) ([]llm.ChatMessage, error) {
 	//   {Role: "user", Content: "今天天气怎么样"}, ← 本轮用户输入(在调用方加)
 	// ]
 	msgs := []llm.ChatMessage{
-		{Role: llm.RoleSystem, Content: a.systemPrompt},
+		{Role: llm.RoleSystem, Content: a.systemPrompt + "\n\n" + longTermMemoryPolicy},
+	}
+
+	// 长期记忆属于用户数据而不是系统指令，因此使用 user 角色作为引用消息注入。
+	// 查询失败时降级为不带长期记忆继续对话，不能让辅助能力阻断核心聊天。
+	longTerm, memoryErr := a.mem.SearchLongTerm(ctx, a.userID, userInput, longTermMemoryLimit)
+	if memoryErr != nil {
+		logger.Warn("long-term memory retrieval degraded",
+			zap.String("trace_id", trace.FromContext(ctx)),
+			zap.Int64("user_id", a.userID),
+			zap.Error(memoryErr),
+		)
+	} else if longTerm.Returned > 0 {
+		msgs = append(msgs, llm.ChatMessage{
+			Role:    llm.RoleUser,
+			Content: formatLongTermMemories(longTerm),
+		})
+		logger.Debug("long-term memories added to model context",
+			zap.String("trace_id", trace.FromContext(ctx)),
+			zap.Int64("user_id", a.userID),
+			zap.Int("memory_count", longTerm.Returned),
+		)
 	}
 
 	// 从 DB 加载最近 historyLimit(20)条历史对话
@@ -129,11 +151,25 @@ func (a *Agent) loadMessages(ctx context.Context) ([]llm.ChatMessage, error) {
 	return msgs, nil
 }
 
+// formatLongTermMemories 把正式记忆编码成有明确边界的引用文本，不记录或提升其权限。
+func formatLongTermMemories(result memory.SearchResult) string {
+	var builder strings.Builder
+	builder.WriteString(longTermMemoryHeader)
+	for _, item := range result.Rows {
+		builder.WriteString("\n- [")
+		builder.WriteString(item.MemoryType)
+		builder.WriteString("] ")
+		builder.WriteString(item.Content)
+	}
+	return builder.String()
+}
+
 // Chat 非流式对话.
 // 流程:生成 trace ID → 加载历史 → 追加用户消息 → 调 LLM → 埋点 → 持久化 → 返回.
 // 参数:
 //   - ctx: 上下文
 //   - userInput: 用户输入的文本
+//
 // 返回值:LLM 的完整回复,错误
 func (a *Agent) Chat(ctx context.Context, userInput string) (llm.ChatResponse, error) {
 	// 记录开始时间,后面算总耗时
@@ -153,7 +189,7 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (llm.ChatResponse, e
 
 	// 1. 加载历史 + 追加当前用户消息
 	// loadMessages 返回 [system prompt] + [最近20条历史] 的消息列表
-	msgs, err := a.loadMessages(ctx)
+	msgs, err := a.loadMessages(ctx, userInput)
 	if err != nil {
 		logger.Error("load chat history failed", zap.Error(err), zap.String("trace_id", traceID))
 		return llm.ChatResponse{}, err
@@ -176,7 +212,7 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (llm.ChatResponse, e
 	telemetry.Emit(ctx,
 		telemetry.EventModelRequestStarted,
 		map[string]any{
-			"model":              a.model,
+			"model":               a.model,
 			telemetry.FieldStatus: telemetry.StatusOK,
 		},
 	)
@@ -200,10 +236,10 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (llm.ChatResponse, e
 		telemetry.Emit(ctx,
 			telemetry.EventModelRequestFailed,
 			map[string]any{
-				"model":              a.model,
-				telemetry.FieldStatus:   telemetry.StatusError,
+				"model":                   a.model,
+				telemetry.FieldStatus:     telemetry.StatusError,
 				telemetry.FieldDurationMS: elapsed.Milliseconds(),
-				"error":              err.Error(),
+				"error":                   err.Error(),
 			},
 		)
 		// Prometheus 指标:记录一次失败的模型调用(Token 用量全 0,因为没拿到回复)
@@ -219,15 +255,15 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (llm.ChatResponse, e
 	telemetry.Emit(ctx,
 		telemetry.EventModelRequestCompleted,
 		map[string]any{
-			"model":              resp.Model,
-			telemetry.FieldStatus:   telemetry.StatusOK,
+			"model":                   resp.Model,
+			telemetry.FieldStatus:     telemetry.StatusOK,
 			telemetry.FieldDurationMS: elapsed.Milliseconds(),
-			"prompt_tokens":      resp.Usage.PromptTokens,
-			"completion_tokens":  resp.Usage.CompletionTokens,
-			"total_tokens":       resp.Usage.TotalTokens,
-			"cache_hit_tokens":   resp.Usage.CacheHitTokens(),
-			"cache_miss_tokens":  resp.Usage.CacheMissTokens(),
-			"reasoning_tokens":   resp.Usage.CompletionTokensDetails.ReasoningTokens,
+			"prompt_tokens":           resp.Usage.PromptTokens,
+			"completion_tokens":       resp.Usage.CompletionTokens,
+			"total_tokens":            resp.Usage.TotalTokens,
+			"cache_hit_tokens":        resp.Usage.CacheHitTokens(),
+			"cache_miss_tokens":       resp.Usage.CacheMissTokens(),
+			"reasoning_tokens":        resp.Usage.CompletionTokensDetails.ReasoningTokens,
 		},
 	)
 
@@ -237,9 +273,9 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (llm.ChatResponse, e
 	// Prometheus 指标:记录一次成功的模型调用,包含各类 Token 用量
 	metrics.RecordModelCall(
 		a.providerName, resp.Model, metrics.StatusOK,
-		float64(resp.Usage.PromptTokens),     // 输入 Token
-		float64(resp.Usage.CompletionTokens),  // 输出 Token
-		float64(resp.Usage.CacheHitTokens()),   // 缓存命中输入 Token
+		float64(resp.Usage.PromptTokens),                            // 输入 Token
+		float64(resp.Usage.CompletionTokens),                        // 输出 Token
+		float64(resp.Usage.CacheHitTokens()),                        // 缓存命中输入 Token
 		float64(resp.Usage.CompletionTokensDetails.ReasoningTokens), // 推理 Token
 	)
 	if err := a.saveMessages(ctx, userInput, resp.Content, resp.Usage); err != nil {
@@ -249,6 +285,7 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (llm.ChatResponse, e
 		)
 		return llm.ChatResponse{}, err
 	}
+	a.createMemoryCandidates(ctx, userInput)
 
 	// 打完成日志,包含 trace ID,模型名,耗时和 token 用量
 	logger.Info("non-stream chat completed",
@@ -267,6 +304,7 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (llm.ChatResponse, e
 // 参数:
 //   - ctx: 上下文
 //   - userInput: 用户输入的文本
+//
 // 返回值:流式读取器,错误
 //
 // 和 Chat 的区别:Chat 等完整回复再返回,ChatStream 边收边返回,前端可以打字机效果.
@@ -295,7 +333,7 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string) (llm.StreamRea
 	)
 
 	// 1. 加载历史并追加当前消息.连接成功后再持久化,避免失败请求留下半轮历史.
-	msgs, err := a.loadMessages(ctx)
+	msgs, err := a.loadMessages(ctx, userInput)
 	if err != nil {
 		logger.Error("load chat history failed", zap.Error(err), zap.String("trace_id", traceID))
 		return nil, err
@@ -326,10 +364,10 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string) (llm.StreamRea
 		telemetry.Emit(ctx,
 			telemetry.EventModelRequestFailed,
 			map[string]any{
-				"model":              a.model,
-				telemetry.FieldStatus:   telemetry.StatusError,
+				"model":                   a.model,
+				telemetry.FieldStatus:     telemetry.StatusError,
 				telemetry.FieldDurationMS: time.Since(start).Milliseconds(),
-				"error":              err.Error(),
+				"error":                   err.Error(),
 			},
 		)
 		// Prometheus 指标:流式连接失败,Token 全 0
@@ -351,6 +389,7 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string) (llm.StreamRea
 			return nil, err
 		}
 	}
+	a.currentInput = userInput
 
 	// 发埋点: 记录模型调用开始事件.
 	// 方案 16.10.2: "创建 model_request_started 事件 → 记录 Span 开始时间 → 调用模型供应商"
@@ -358,8 +397,8 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string) (llm.StreamRea
 	telemetry.Emit(ctx,
 		telemetry.EventModelRequestStarted,
 		map[string]any{
-			"model":              a.model,
-			telemetry.FieldStatus:   telemetry.StatusOK,
+			"model":                   a.model,
+			telemetry.FieldStatus:     telemetry.StatusOK,
 			telemetry.FieldDurationMS: time.Since(start).Milliseconds(),
 		},
 	)
@@ -405,26 +444,26 @@ func (a *Agent) FinishStream(ctx context.Context, fullContent string, usage llm.
 	telemetry.Emit(ctx,
 		telemetry.EventModelRequestCompleted,
 		map[string]any{
-			"model":              a.model,
-			telemetry.FieldStatus:   telemetry.StatusOK,
-			"first_token_ms":     streamMetrics.FirstTokenMs,
-			"total_duration_ms":  streamMetrics.TotalDurationMs,
-			"tokens_per_second":  tokensPerSecond,
-			"prompt_tokens":      usage.PromptTokens,
-			"completion_tokens":  usage.CompletionTokens,
-			"total_tokens":       usage.TotalTokens,
-			"cache_hit_tokens":   usage.CacheHitTokens(),
-			"cache_miss_tokens":  usage.CacheMissTokens(),
-			"reasoning_tokens":   usage.CompletionTokensDetails.ReasoningTokens,
+			"model":               a.model,
+			telemetry.FieldStatus: telemetry.StatusOK,
+			"first_token_ms":      streamMetrics.FirstTokenMs,
+			"total_duration_ms":   streamMetrics.TotalDurationMs,
+			"tokens_per_second":   tokensPerSecond,
+			"prompt_tokens":       usage.PromptTokens,
+			"completion_tokens":   usage.CompletionTokens,
+			"total_tokens":        usage.TotalTokens,
+			"cache_hit_tokens":    usage.CacheHitTokens(),
+			"cache_miss_tokens":   usage.CacheMissTokens(),
+			"reasoning_tokens":    usage.CompletionTokensDetails.ReasoningTokens,
 		},
 	)
 
 	// Prometheus 指标:流式调用成功结束,记录各类 Token 用量
 	metrics.RecordModelCall(
 		a.providerName, a.model, metrics.StatusOK,
-		float64(usage.PromptTokens),     // 输入 Token
-		float64(usage.CompletionTokens),  // 输出 Token
-		float64(usage.CacheHitTokens()),   // 缓存命中输入 Token
+		float64(usage.PromptTokens),                            // 输入 Token
+		float64(usage.CompletionTokens),                        // 输出 Token
+		float64(usage.CacheHitTokens()),                        // 缓存命中输入 Token
 		float64(usage.CompletionTokensDetails.ReasoningTokens), // 推理 Token
 	)
 
@@ -442,6 +481,8 @@ func (a *Agent) FinishStream(ctx context.Context, fullContent string, usage llm.
 			)
 			return err
 		}
+		a.createMemoryCandidates(ctx, a.currentInput)
+		a.currentInput = ""
 		return nil
 	} else {
 		// 无 DB 模式:把完整回复追加到内存切片
@@ -452,6 +493,26 @@ func (a *Agent) FinishStream(ctx context.Context, fullContent string, usage llm.
 	return nil
 }
 
+// createMemoryCandidates 根据本轮用户原话生成待确认候选；失败只记录观测降级，不影响对话成功。
+func (a *Agent) createMemoryCandidates(ctx context.Context, userInput string) {
+	if a.mem == nil || strings.TrimSpace(userInput) == "" {
+		return
+	}
+	candidates, err := a.mem.CreateCandidates(ctx, a.userID, a.sessionID, userInput)
+	if err != nil {
+		logger.Error("long-term memory candidate generation failed",
+			zap.String("trace_id", trace.FromContext(ctx)),
+			zap.Int64("user_id", a.userID),
+			zap.Error(err),
+		)
+		return
+	}
+	logger.Debug("long-term memory candidate generation completed",
+		zap.String("trace_id", trace.FromContext(ctx)),
+		zap.Int64("user_id", a.userID),
+		zap.Int("candidate_count", len(candidates)),
+	)
+}
 
 // Next 读取下一块内容,同时记录首字时间和结束时间.
 // 返回值:内容文本,是否结束(true=读完了),错误

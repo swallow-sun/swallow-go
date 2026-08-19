@@ -18,18 +18,17 @@
 //	后续阶段加认证后, userID 从 JWT/Session 里取.
 package handler
 
-	import (
-		"context"
-		"strconv"
+import (
+	"context"
+	"strconv"
 
-		"github.com/cloudwego/hertz/pkg/app"
-		"github.com/cloudwego/hertz/pkg/protocol/consts"
-		"github.com/swallow-sun/swallow-go/internal/apperror"
-		"github.com/swallow-sun/swallow-go/internal/trace"
-		"github.com/swallow-sun/swallow-go/pkg/logger"
-		"go.uber.org/zap"
-	)
-
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/swallow-sun/swallow-go/internal/apperror"
+	"github.com/swallow-sun/swallow-go/internal/trace"
+	"github.com/swallow-sun/swallow-go/pkg/logger"
+	"go.uber.org/zap"
+)
 
 // CreateCandidate POST /api/v1/memory-candidates
 // 手动提交一条记忆候选.
@@ -43,20 +42,20 @@ func (d *Deps) CreateCandidate(ctx context.Context, c *app.RequestContext) {
 	// 当前阶段没有认证中间件, 暂时从 query 参数取
 	userID, ok := parseUserID(c)
 	if !ok {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_user_id", "valid user_id is required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMissingUserID, "valid user_id is required", ""))
 		return
 	}
 
 	// 解析请求体
 	var req createCandidateReq
 	if err := c.BindAndValidate(&req); err != nil {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_request_body", "invalid request body", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeInvalidRequestBody, "invalid request body", ""))
 		return
 	}
 
 	// 校验必填字段
 	if req.Content == "" || req.MemoryType == "" {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_required_fields", "content and memory_type are required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMissingRequiredFields, "content and memory_type are required", ""))
 		return
 	}
 
@@ -81,7 +80,7 @@ func (d *Deps) ListCandidates(ctx context.Context, c *app.RequestContext) {
 	ctx, _ = trace.Ensure(ctx)
 	userID, ok := parseUserID(c)
 	if !ok {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_user_id", "valid user_id is required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMissingUserID, "valid user_id is required", ""))
 		return
 	}
 
@@ -107,7 +106,7 @@ func (d *Deps) ConfirmCandidate(ctx context.Context, c *app.RequestContext) {
 	ctx, _ = trace.Ensure(ctx)
 	userID, ok := parseUserID(c)
 	if !ok {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_user_id", "valid user_id is required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMissingUserID, "valid user_id is required", ""))
 		return
 	}
 
@@ -115,7 +114,7 @@ func (d *Deps) ConfirmCandidate(ctx context.Context, c *app.RequestContext) {
 	// c.Param("id") 是 Hertz 框架取路径参数的方法
 	candidateID, ok := parsePathID(c, "id")
 	if !ok {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_candidate_id", "valid candidate id is required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeInvalidCandidateID, "valid candidate id is required", ""))
 		return
 	}
 
@@ -135,20 +134,20 @@ func (d *Deps) ConfirmCandidate(ctx context.Context, c *app.RequestContext) {
 
 // RejectCandidate POST /api/v1/memory-candidates/{id}/reject
 // 拒绝候选.
-	func (d *Deps) RejectCandidate(ctx context.Context, c *app.RequestContext) {
+func (d *Deps) RejectCandidate(ctx context.Context, c *app.RequestContext) {
 	if !d.authorizeOwner(c) {
 		return
 	}
 	ctx, _ = trace.Ensure(ctx)
 	userID, ok := parseUserID(c)
 	if !ok {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_user_id", "valid user_id is required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMissingUserID, "valid user_id is required", ""))
 		return
 	}
 
 	candidateID, ok := parsePathID(c, "id")
 	if !ok {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_candidate_id", "valid candidate id is required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeInvalidCandidateID, "valid candidate id is required", ""))
 		return
 	}
 
@@ -162,19 +161,19 @@ func (d *Deps) ConfirmCandidate(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	c.JSON(consts.StatusOK, map[string]string{"status": "rejected"})
+	c.JSON(consts.StatusOK, map[string]string{"status": ResponseStatusRejected})
 }
 
 // ListMemories GET /api/v1/memories?user_id=1
 // 按用户 ID 查正式记忆列表.
-	func (d *Deps) ListMemories(ctx context.Context, c *app.RequestContext) {
+func (d *Deps) ListMemories(ctx context.Context, c *app.RequestContext) {
 	if !d.authorizeOwner(c) {
 		return
 	}
 	ctx, _ = trace.Ensure(ctx)
 	userID, ok := parseUserID(c)
 	if !ok {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_user_id", "valid user_id is required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMissingUserID, "valid user_id is required", ""))
 		return
 	}
 
@@ -197,24 +196,24 @@ func (d *Deps) UpdateMemory(ctx context.Context, c *app.RequestContext) {
 	ctx, _ = trace.Ensure(ctx)
 	userID, ok := parseUserID(c)
 	if !ok {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_user_id", "valid user_id is required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMissingUserID, "valid user_id is required", ""))
 		return
 	}
 
 	memoryID, ok := parsePathID(c, "id")
 	if !ok {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_memory_id", "valid memory id is required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeInvalidMemoryID, "valid memory id is required", ""))
 		return
 	}
 
 	var req updateMemoryReq
 	if err := c.BindAndValidate(&req); err != nil {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_request_body", "invalid request body", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeInvalidRequestBody, "invalid request body", ""))
 		return
 	}
 
 	if req.Content == "" {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_content", "content is required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMissingContent, "content is required", ""))
 		return
 	}
 
@@ -241,13 +240,13 @@ func (d *Deps) DeleteMemory(ctx context.Context, c *app.RequestContext) {
 	ctx, _ = trace.Ensure(ctx)
 	userID, ok := parseUserID(c)
 	if !ok {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("missing_user_id", "valid user_id is required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMissingUserID, "valid user_id is required", ""))
 		return
 	}
 
 	memoryID, ok := parsePathID(c, "id")
 	if !ok {
-		writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_memory_id", "valid memory id is required", ""))
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeInvalidMemoryID, "valid memory id is required", ""))
 		return
 	}
 
@@ -261,7 +260,7 @@ func (d *Deps) DeleteMemory(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	c.JSON(consts.StatusOK, map[string]string{"status": "deleted"})
+	c.JSON(consts.StatusOK, map[string]string{"status": ResponseStatusDeleted})
 }
 
 // parseUserID 从 URL query 参数里取 user_id 并转成 int64.

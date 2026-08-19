@@ -61,7 +61,7 @@ func StartSpan(ctx context.Context, component, operation string) (context.Contex
 		ParentSpanID: parentID,             // 父 Span ID,根 Span 为空
 		Component:    component,            // 组件名
 		Operation:    operation,            // 操作名
-		Status:       "ok",                 // 默认成功,出错了改成 error 或 cancelled
+		Status:       SpanStatusOK,         // 默认成功,出错了改成 error 或 cancelled
 		StartedAt:    time.Now(),           // 记录开始时间
 		Attributes:   make(map[string]any), // 附加属性,初始空 map
 	}
@@ -100,7 +100,7 @@ func (s *Span) End(status string) {
 
 // EndOK 是 End("ok") 的简写,正常结束用.
 func (s *Span) EndOK() {
-	s.End("ok")
+	s.End(SpanStatusOK)
 }
 
 // EndError 是 End("error") 的简写,出错时用.
@@ -110,7 +110,7 @@ func (s *Span) EndError(attrs map[string]any) {
 	for k, v := range attrs {
 		s.Attributes[k] = v
 	}
-	s.End("error")
+	s.End(SpanStatusError)
 }
 
 // flush 把 Span 写库(异步).

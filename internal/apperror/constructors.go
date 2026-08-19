@@ -1,7 +1,9 @@
-// constructors.go provides factory functions for common apperror.Error values.
+// constructors.go 放统一应用错误的构造和方法实现.
 //
-// Each factory returns a pre-configured *Error with sensible defaults.
-// Handlers can override specific fields (e.g. TraceID) after construction if needed.
+// 做的事情:
+//  1. 实现 Error 方法, 让 *Error 满足 Go 标准 error 接口.
+//  2. 提供常见 HTTP 错误构造函数, 统一业务错误码、HTTP 状态码和重试策略.
+//  3. 避免 handler 每次手动组装 Error, 导致字段遗漏或行为不一致.
 
 package apperror
 
@@ -9,8 +11,13 @@ import (
 	"net/http"
 )
 
-// New creates a new *Error with the given fields.
-// Use this when you need full control over all fields.
+// Error 返回稳定错误码，使 *Error 满足 Go 标准 error 接口。
+func (e *Error) Error() string {
+	return e.Code
+}
+
+// New 创建一条可以完整指定所有字段的应用错误.
+// 只有现有快捷构造函数无法表达错误场景时才使用.
 func New(code, message string, statusCode int, retryable bool, traceID string) *Error {
 	return &Error{
 		Code:       code,
@@ -21,8 +28,8 @@ func New(code, message string, statusCode int, retryable bool, traceID string) *
 	}
 }
 
-// BadRequest returns a 400 error with the given code and message.
-// 4xx errors are not retryable.
+// BadRequest 创建 HTTP 400 参数错误.
+// 参数错误由客户端修正请求, 默认不可重试.
 func BadRequest(code, message, traceID string) *Error {
 	return &Error{
 		Code:       code,
@@ -33,10 +40,10 @@ func BadRequest(code, message, traceID string) *Error {
 	}
 }
 
-// Unauthorized returns a 401 error.
+// Unauthorized 创建 HTTP 401 未认证错误.
 func Unauthorized(traceID string) *Error {
 	return &Error{
-		Code:       "unauthorized",
+		Code:       CodeUnauthorized,
 		Message:    "authentication required",
 		StatusCode: http.StatusUnauthorized,
 		Retryable:  false,
@@ -44,10 +51,10 @@ func Unauthorized(traceID string) *Error {
 	}
 }
 
-// NotFound returns a 404 error for the given resource.
+// NotFound 创建 HTTP 404 资源不存在错误.
 func NotFound(resource, traceID string) *Error {
 	return &Error{
-		Code:       "not_found",
+		Code:       CodeNotFound,
 		Message:    resource + " not found",
 		StatusCode: http.StatusNotFound,
 		Retryable:  false,
@@ -55,10 +62,10 @@ func NotFound(resource, traceID string) *Error {
 	}
 }
 
-// Conflict returns a 409 error (e.g. idempotency conflict).
+// Conflict 创建 HTTP 409 状态冲突错误, 如幂等键对应的请求内容不一致.
 func Conflict(message, traceID string) *Error {
 	return &Error{
-		Code:       "conflict",
+		Code:       CodeConflict,
 		Message:    message,
 		StatusCode: http.StatusConflict,
 		Retryable:  false,
@@ -66,12 +73,11 @@ func Conflict(message, traceID string) *Error {
 	}
 }
 
-// Internal returns a 500 error with a generic message.
-// Internal details are logged but not exposed to the client.
-// 5xx errors are retryable.
+// Internal 创建 HTTP 500 内部错误.
+// 内部错误详情只写日志, 返回给客户端的是通用说明, 默认允许重试.
 func Internal(traceID string) *Error {
 	return &Error{
-		Code:       "internal_error",
+		Code:       CodeInternal,
 		Message:    "internal server error",
 		StatusCode: http.StatusInternalServerError,
 		Retryable:  true,
@@ -79,10 +85,10 @@ func Internal(traceID string) *Error {
 	}
 }
 
-// ServiceUnavailable returns a 503 error (e.g. owner token not configured).
+// ServiceUnavailable 创建 HTTP 503 服务不可用错误, 如主人令牌没有配置.
 func ServiceUnavailable(message, traceID string) *Error {
 	return &Error{
-		Code:       "service_unavailable",
+		Code:       CodeServiceUnavailable,
 		Message:    message,
 		StatusCode: http.StatusServiceUnavailable,
 		Retryable:  true,
