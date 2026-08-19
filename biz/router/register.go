@@ -3,7 +3,8 @@
 // 做的事情:
 //  1. 注册健康检查路由: GET /ping.
 //  2. 注册对话 API 路由: POST /api/session, GET /api/history, POST /api/chat.
-//  3. 路由对应的 handler 方法绑定在 deps 上, 共享同一份依赖.
+//  3. 注册看板 API 路由: GET /api/v1/dashboard/model-usage.
+//  4. 路由对应的 handler 方法绑定在 deps 上, 共享同一份依赖.
 package router
 
 import (
@@ -41,6 +42,32 @@ func Register(r *server.Hertz, deps *handler.Deps) {
 		// 完整路径是 /api/chat, 用于发消息跟 AI 对话
 		// POST 请求, 参数通过 body 传, 支持 SSE 流式返回
 		api.POST("/chat", deps.Chat)
+	}
+
+	// 看板 API
+	// r.Group("/api/v1") 创建一个带版本号的 API 分组, 前缀 /api/v1
+	// 方案 15.7 节: 看板由 Go 服务端提供只读聚合接口, 不允许前端直接连数据库
+	v1 := r.Group("/api/v1")
+	{
+		// 完整路径是 /api/v1/dashboard/model-usage, 用于查模型用量日聚合数据
+		// GET 请求, 参数通过 URL query 传, 比如 ?from=2026-08-01&to=2026-08-18
+		v1.GET("/dashboard/model-usage", deps.GetModelUsage)
+
+		// 记忆候选 API
+		// 方案 16.11.1 节的第一批接口
+		// POST 创建候选, GET 查候选列表
+		v1.POST("/memory-candidates", deps.CreateCandidate)
+		v1.GET("/memory-candidates", deps.ListCandidates)
+		// :id 是路径参数, Hertz 框架自动解析到 c.Param("id")
+		// POST confirm 确认候选, POST reject 拒绝候选
+		v1.POST("/memory-candidates/:id/confirm", deps.ConfirmCandidate)
+		v1.POST("/memory-candidates/:id/reject", deps.RejectCandidate)
+
+		// 正式记忆 API
+		// GET 查记忆列表, PATCH 编辑记忆, DELETE 软删记忆
+		v1.GET("/memories", deps.ListMemories)
+		v1.PATCH("/memories/:id", deps.UpdateMemory)
+		v1.DELETE("/memories/:id", deps.DeleteMemory)
 	}
 }
 

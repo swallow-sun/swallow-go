@@ -25,6 +25,7 @@ import (
 	"github.com/swallow-sun/swallow-go/internal/agent"
 	"github.com/swallow-sun/swallow-go/internal/data"
 	"github.com/swallow-sun/swallow-go/internal/provider/llm"
+	"github.com/swallow-sun/swallow-go/internal/telemetry"
 	"github.com/swallow-sun/swallow-go/internal/trace"
 	"github.com/swallow-sun/swallow-go/pkg/logger"
 	"go.uber.org/zap"
@@ -73,6 +74,19 @@ func (s *ChatService) Chat(ctx context.Context, sessionID, clientMessageID, mess
 	// trace.Ensure 检查 chatCtx 里有没有 trace ID, 没有就生成一个塞进去
 	// 返回值 chatCtx 是塞了 trace ID 的上下文, traceID 是取出来的 ID 字符串
 	chatCtx, traceID := trace.Ensure(chatCtx)
+
+	// 发埋点: 记录收到用户消息事件.
+	// 方案 16.10.1 节要求的 6 种事件之一, 在服务端收到用户消息后发出.
+	// 包含会话 ID 和消息长度, 方便后续按会话查询事件
+	telemetry.Emit(chatCtx,
+		telemetry.EventMessageReceived,
+		map[string]any{
+			"session_id":          sessionID,
+			"client_message_id":   clientMessageID,
+			"message_chars":       len(message),
+			telemetry.FieldStatus: telemetry.StatusOK,
+		},
+	)
 
 	// 在调模型前先占用幂等键. 如果记录已经存在了, 绝不能再调一次模型.
 	chatRequest, created, err := s.deps.repo.BeginChatRequest(
@@ -206,6 +220,16 @@ func (s *ChatService) streamLoop(
 		if err != nil {
 			s.failChatRequest(chatRequest.ID, traceID, ChatErrorStreamRead)
 			logger.Error("Failed to read LLM stream", zap.Error(err), zap.String("trace_id", traceID))
+			// 发埋点: 记录模型调用失败事件.
+			// 方案 16.10.1 节要求的 6 种事件之一, 在模型调用出错时发出.
+			// 读流失败属于模型调用失败的一种, 包含错误信息方便排查
+			telemetry.Emit(chatCtx,
+				telemetry.EventModelRequestFailed,
+				map[string]any{
+					telemetry.FieldStatus: telemetry.StatusError,
+					"error":               err.Error(),
+				},
+			)
 			// 告诉客户端这次流式响应失败了
 			// sendEvent 把事件发到 channel, handler 读到后转 SSE 写给客户端
 			// 这里 Content 为空, 客户端收到后知道这次回复失败了
@@ -284,6 +308,18 @@ func (s *ChatService) streamLoop(
 			zap.String("provider", modelUsage.Provider),
 			zap.String("model", modelUsage.Model),
 		)
+	} else {
+		// 原始用量写入成功后, 聚合到日表供看板查询.
+		// 方案 15.7 节: 原始用量写入成功后通过幂等聚合任务更新日表.
+		// 聚合失败不能丢失原始记录, 这里只打日志不阻断主流程.
+		if err := s.deps.repo.UpsertModelUsageDaily(finishCtx, modelUsage); err != nil {
+			logger.Error("Failed to aggregate model usage to daily table",
+				zap.Error(err),
+				zap.String("trace_id", traceID),
+				zap.String("provider", modelUsage.Provider),
+				zap.String("model", modelUsage.Model),
+			)
+		}
 	}
 
 	// 助手消息已经存进数据库后再完成幂等请求. 两步之间如果进程断了, 重试时会按 trace 恢复状态.
@@ -321,6 +357,21 @@ func (s *ChatService) streamLoop(
 	// 所有操作成功后才发送 done 事件.
 	// 客户端收到 done 就知道"这次对话完整结束了, 可以关闭连接了"
 	sendEvent(events, ChatEvent{Type: ChatEventDone, TraceID: traceID})
+
+	// 发埋点: 记录整轮消息处理完成事件.
+	// 方案 16.10.1 节要求的 6 种事件之一, 在对话正常结束后发出.
+	// 包含 token 用量和耗时, 方便后续按 trace ID 查询完整调用链
+	telemetry.Emit(finishCtx,
+		telemetry.EventMessageCompleted,
+		map[string]any{
+			"session_id":            chatRequest.SessionID,
+			telemetry.FieldStatus:   telemetry.StatusOK,
+			telemetry.FieldDurationMS: metrics.TotalDurationMs,
+			"prompt_tokens":         usage.PromptTokens,
+			"completion_tokens":     usage.CompletionTokens,
+			"total_tokens":          usage.TotalTokens,
+		},
+	)
 }
 
 // handleExistingChatRequest 处理相同幂等键的重试.

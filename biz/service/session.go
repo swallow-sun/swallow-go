@@ -11,6 +11,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/swallow-sun/swallow-go/internal/telemetry"
+	"github.com/swallow-sun/swallow-go/internal/trace"
 	"github.com/swallow-sun/swallow-go/pkg/logger"
 	"go.uber.org/zap"
 )
@@ -54,6 +56,21 @@ func (s *SessionService) CreateSession(ctx context.Context, userName string) (Cr
 	logger.Info("Session created",
 		zap.String("user", user.Name),
 		zap.String("session_id", sessionID),
+	)
+
+	// 发埋点: 记录会话创建事件.
+	// 方案 16.10.1 节要求的 6 种事件之一, 在会话创建成功后发出.
+	// trace.Ensure 检查 context 里有没有 trace ID, 没有就生成一个塞进去
+	// 返回的 ctx 带上了 trace ID, telemetry.Emit 从 ctx 里取出来带上
+	ctx, _ = trace.Ensure(ctx)
+	telemetry.Emit(ctx,
+		telemetry.EventSessionCreated,
+		map[string]any{
+			"session_id":          sessionID,
+			"user_id":             user.ID,
+			"user_name":           user.Name,
+			telemetry.FieldStatus: telemetry.StatusOK,
+		},
 	)
 
 	return CreateSessionResult{

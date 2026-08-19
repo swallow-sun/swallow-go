@@ -102,9 +102,6 @@ func (r *sqliteRepo) DeleteAppSetting(ctx context.Context, key string) error {
 		return fmt.Errorf("delete app setting %q: %w", key, err)
 	}
 
-	logger.Debug("app_settings delete succeeded",
-		zap.String("key", key),
-	)
 	return nil
 }
 
@@ -144,13 +141,6 @@ func (r *sqliteRepo) CreateEncryptedSecretIfAbsent(ctx context.Context, secret E
 	}
 
 	// RowsAffected == 1 新建成功,== 0 已存在
-	// 注意:密文字段(ciphertext,nonce)不打日志,所以不用 zap.Any("row", model)
-	logger.Debug("encrypted_secrets insert completed",
-		zap.String("key", secret.Key),
-		zap.String("algorithm", secret.Algorithm),
-		zap.Int("key_version", secret.KeyVersion),
-		zap.Bool("created", result.RowsAffected == 1),
-	)
 	return result.RowsAffected == 1, nil
 }
 
@@ -180,12 +170,6 @@ func (r *sqliteRepo) UpsertEncryptedSecret(ctx context.Context, secret Encrypted
 		return fmt.Errorf("upsert encrypted secret %q: %w", secret.Key, err)
 	}
 
-	// 注意:密文字段(ciphertext,nonce)不打日志,所以不用 zap.Any("row", model)
-	logger.Debug("encrypted_secrets upsert succeeded",
-		zap.String("key", secret.Key),
-		zap.String("algorithm", secret.Algorithm),
-		zap.Int("key_version", secret.KeyVersion),
-	)
 	return nil
 }
 
@@ -203,9 +187,6 @@ func (r *sqliteRepo) DeleteEncryptedSecret(ctx context.Context, key string) erro
 		return fmt.Errorf("delete encrypted secret %q: %w", key, err)
 	}
 
-	logger.Debug("encrypted_secrets delete succeeded",
-		zap.String("key", key),
-	)
 	return nil
 }
 

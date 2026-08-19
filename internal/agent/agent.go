@@ -171,6 +171,16 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (llm.ChatResponse, e
 		Messages: msgs,
 	}
 
+	// 发埋点: 记录模型调用开始事件.
+	// 方案 16.10.2 节: "创建 model_request_started 事件 → 记录 Span 开始时间 → 调用模型供应商"
+	telemetry.Emit(ctx,
+		telemetry.EventModelRequestStarted,
+		map[string]any{
+			"model":              a.model,
+			telemetry.FieldStatus: telemetry.StatusOK,
+		},
+	)
+
 	// 3. 调 LLM——发请求给模型,等待完整回复
 	// provider.Complete 是非流式调用,会阻塞直到收到完整回复
 	resp, err := a.provider.Complete(ctx, req)
@@ -185,34 +195,41 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (llm.ChatResponse, e
 			zap.String("model", a.model),
 			zap.Int64("duration_ms", elapsed.Milliseconds()),
 		)
-		// telemetry.Emit 发一条埋点事件,记录这次调用失败了
-		// 埋点数据会被异步收集,用于监控和告警
-		telemetry.Emit(ctx, telemetry.EventLLMCall, map[string]any{
-			"model":  a.model,
-			telemetry.FieldStatus:     telemetry.StatusError,
-			telemetry.FieldDurationMS: elapsed.Milliseconds(),
-			"error":  err.Error(),
-		})
+		// 发埋点: 记录模型调用失败事件.
+		// 方案 16.10.2: 模型调用出错时发 model_request_failed, 包含错误信息
+		telemetry.Emit(ctx,
+			telemetry.EventModelRequestFailed,
+			map[string]any{
+				"model":              a.model,
+				telemetry.FieldStatus:   telemetry.StatusError,
+				telemetry.FieldDurationMS: elapsed.Milliseconds(),
+				"error":              err.Error(),
+			},
+		)
 		// Prometheus 指标:记录一次失败的模型调用(Token 用量全 0,因为没拿到回复)
 		metrics.RecordModelCall(a.providerName, a.model, metrics.StatusFailed, 0, 0, 0, 0)
 		return llm.ChatResponse{}, err
 	}
 
-	// 4. 埋点——记录成功的 LLM 调用
+	// 4. 埋点——记录成功的模型调用完成
+	// 方案 16.10.2: 模型返回结果后发 model_request_completed, 包含 token 用量
 	// 包含 token 用量(prompt_tokens = 输入 token 数,completion_tokens = 输出 token 数)
 	// cache_hit_tokens / cache_miss_tokens 是缓存命中情况(有些 API 支持 prompt 缓存)
 	// reasoning_tokens 是推理 token 数(如 OpenAI o1 系列的内部推理)
-	telemetry.Emit(ctx, telemetry.EventLLMCall, map[string]any{
-		"model":             resp.Model,
-		telemetry.FieldStatus:     telemetry.StatusOK,
-		telemetry.FieldDurationMS: elapsed.Milliseconds(),
-		"prompt_tokens":     resp.Usage.PromptTokens,
-		"completion_tokens": resp.Usage.CompletionTokens,
-		"total_tokens":      resp.Usage.TotalTokens,
-		"cache_hit_tokens":  resp.Usage.CacheHitTokens(),
-		"cache_miss_tokens": resp.Usage.CacheMissTokens(),
-		"reasoning_tokens":  resp.Usage.CompletionTokensDetails.ReasoningTokens,
-	})
+	telemetry.Emit(ctx,
+		telemetry.EventModelRequestCompleted,
+		map[string]any{
+			"model":              resp.Model,
+			telemetry.FieldStatus:   telemetry.StatusOK,
+			telemetry.FieldDurationMS: elapsed.Milliseconds(),
+			"prompt_tokens":      resp.Usage.PromptTokens,
+			"completion_tokens":  resp.Usage.CompletionTokens,
+			"total_tokens":       resp.Usage.TotalTokens,
+			"cache_hit_tokens":   resp.Usage.CacheHitTokens(),
+			"cache_miss_tokens":  resp.Usage.CacheMissTokens(),
+			"reasoning_tokens":   resp.Usage.CompletionTokensDetails.ReasoningTokens,
+		},
+	)
 
 	// 5. 持久化(user + assistant 两条都写 DB)
 	// saveMessages 把用户输入和模型回复都存进 DB(或内存切片)
@@ -304,12 +321,17 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string) (llm.StreamRea
 			zap.String("model", a.model),
 			zap.Int64("duration_ms", time.Since(start).Milliseconds()),
 		)
-		telemetry.Emit(ctx, telemetry.EventLLMStream, map[string]any{
-			"model":  a.model,
-			telemetry.FieldStatus:     telemetry.StatusError,
-			telemetry.FieldDurationMS: time.Since(start).Milliseconds(),
-			"error":  err.Error(),
-		})
+		// 发埋点: 记录模型调用失败事件.
+		// 流式连接失败属于模型调用失败的一种
+		telemetry.Emit(ctx,
+			telemetry.EventModelRequestFailed,
+			map[string]any{
+				"model":              a.model,
+				telemetry.FieldStatus:   telemetry.StatusError,
+				telemetry.FieldDurationMS: time.Since(start).Milliseconds(),
+				"error":              err.Error(),
+			},
+		)
 		// Prometheus 指标:流式连接失败,Token 全 0
 		metrics.RecordModelCall(a.providerName, a.model, metrics.StatusFailed, 0, 0, 0, 0)
 		return nil, err
@@ -330,12 +352,17 @@ func (a *Agent) ChatStream(ctx context.Context, userInput string) (llm.StreamRea
 		}
 	}
 
-	// 发埋点:记录流式连接成功
-	telemetry.Emit(ctx, telemetry.EventLLMStream, map[string]any{
-		"model":  a.model,
-		telemetry.FieldStatus:     telemetry.StatusConnected,
-		telemetry.FieldDurationMS: time.Since(start).Milliseconds(),
-	})
+	// 发埋点: 记录模型调用开始事件.
+	// 方案 16.10.2: "创建 model_request_started 事件 → 记录 Span 开始时间 → 调用模型供应商"
+	// 流式场景下连接成功 = 模型调用开始
+	telemetry.Emit(ctx,
+		telemetry.EventModelRequestStarted,
+		map[string]any{
+			"model":              a.model,
+			telemetry.FieldStatus:   telemetry.StatusOK,
+			telemetry.FieldDurationMS: time.Since(start).Milliseconds(),
+		},
+	)
 
 	// 打日志:连接成功,记录连接耗时
 	logger.Info("stream LLM connected",
@@ -370,23 +397,27 @@ func (a *Agent) FinishStream(ctx context.Context, fullContent string, usage llm.
 			float64(usage.CompletionTokens) /
 				(float64(streamMetrics.TotalDurationMs) / 1000)
 	}
-	// 发埋点:记录流式调用完成,包含性能指标和 token 用量
+	// 发埋点: 记录模型调用完成事件.
+	// 方案 16.10.2: 模型返回结果后发 model_request_completed, 包含 token 用量和性能指标
 	// first_token_ms: 第一个 token 的等待时间(体现响应速度)
 	// total_duration_ms: 整个流式调用的总耗时
 	// tokens_per_second: 输出速度
-	telemetry.Emit(ctx, telemetry.EventLLMStreamComplete, map[string]any{
-		"model":             a.model,
-		telemetry.FieldStatus: telemetry.StatusOK,
-		"first_token_ms":    streamMetrics.FirstTokenMs,
-		"total_duration_ms": streamMetrics.TotalDurationMs,
-		"tokens_per_second": tokensPerSecond,
-		"prompt_tokens":     usage.PromptTokens,
-		"completion_tokens": usage.CompletionTokens,
-		"total_tokens":      usage.TotalTokens,
-		"cache_hit_tokens":  usage.CacheHitTokens(),
-		"cache_miss_tokens": usage.CacheMissTokens(),
-		"reasoning_tokens":  usage.CompletionTokensDetails.ReasoningTokens,
-	})
+	telemetry.Emit(ctx,
+		telemetry.EventModelRequestCompleted,
+		map[string]any{
+			"model":              a.model,
+			telemetry.FieldStatus:   telemetry.StatusOK,
+			"first_token_ms":     streamMetrics.FirstTokenMs,
+			"total_duration_ms":  streamMetrics.TotalDurationMs,
+			"tokens_per_second":  tokensPerSecond,
+			"prompt_tokens":      usage.PromptTokens,
+			"completion_tokens":  usage.CompletionTokens,
+			"total_tokens":       usage.TotalTokens,
+			"cache_hit_tokens":   usage.CacheHitTokens(),
+			"cache_miss_tokens":  usage.CacheMissTokens(),
+			"reasoning_tokens":   usage.CompletionTokensDetails.ReasoningTokens,
+		},
+	)
 
 	// Prometheus 指标:流式调用成功结束,记录各类 Token 用量
 	metrics.RecordModelCall(

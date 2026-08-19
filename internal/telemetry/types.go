@@ -28,13 +28,28 @@ const (
 	// 3 秒还没写完就超时放弃,不拖住消费者 goroutine
 	DefaultSinkWriteTimeout = 3 * time.Second
 
-	// 下面是事件类型常量,业务代码调 Emit 时传的 name 参数.
-	// 比如 telemetry.Emit(ctx, telemetry.EventLLMCall, ...)
-	EventDialogue          = "dialogue"           // 对话事件:用户发消息或助手回复
-	EventMemoryQuery       = "memory_query"       // 记忆查询事件:查记忆库
-	EventLLMCall           = "llm.call"            // LLM 调用事件:非流式调模型
-	EventLLMStream         = "llm.stream"          // LLM 流式事件:流式调模型开始
-	EventLLMStreamComplete = "llm.stream.complete" // LLM 流式完成事件:流式调模型结束
+	// 下面是事件类型常量, 业务代码调 Emit 时传的 name 参数.
+	// 方案 16.10.1 节要求的最先支持的 6 种事件类型:
+	//   session_created          — 会话创建
+	//   message_received         — 收到用户消息
+	//   model_request_started    — 模型调用开始
+	//   model_request_completed  — 模型调用完成
+	//   model_request_failed     — 模型调用失败
+	//   message_completed        — 整轮消息处理完成
+	//
+	// 另外保留两个业务事件(方案 15.2 节: "现有 events 表继续作为业务事件入口"):
+	//   dialogue     — 对话消息持久化
+	//   memory_query — 记忆查询
+	EventSessionCreated        = "session_created"         // 会话创建事件: 用户登录并创建新会话
+	EventMessageReceived       = "message_received"        // 消息接收事件: 服务端收到用户发来的消息
+	EventModelRequestStarted   = "model_request_started"   // 模型调用开始事件: 开始调模型供应商
+	EventModelRequestCompleted = "model_request_completed" // 模型调用完成事件: 模型返回结果
+	EventModelRequestFailed    = "model_request_failed"    // 模型调用失败事件: 模型调用出错
+	EventMessageCompleted      = "message_completed"       // 消息处理完成事件: 整轮对话结束
+
+	EventDialogue       = "dialogue"        // 对话事件: 用户发消息或助手回复(业务事件, 非 6 种之一)
+	EventMemoryQuery    = "memory_query"     // 记忆查询事件: 检索长期记忆(业务事件, 非 6 种之一)
+	EventMemoryConfirmed = "memory_confirmed" // 记忆确认事件: 候选确认后写正式记忆(方案 16.11.3 节)
 
 	// 下面是通用事件字段名,放在 Fields map 里的 key.
 	FieldStatus     = "status" // 状态字段:值是 ok/error/connected

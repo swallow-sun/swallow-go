@@ -53,6 +53,10 @@ const (
 	// 和 ChatRequest 的状态不同,model_usages 只记最终结果,不记中间状态.
 	ModelUsageStatusOK     = "ok"     // 模型调用成功
 	ModelUsageStatusFailed = "failed" // 模型调用失败
+
+	// ErrPriceNotFound 表示没找到指定供应商+模型在指定时间点的价格快照.
+	// 调用方据此决定是跳过费用估算还是报错.
+	ErrPriceNotFound = "price_snapshot_not_found"
 )
 
 // Repository 是数据访问层的统一接口.
@@ -109,6 +113,19 @@ type Repository interface {
 	// 方便按供应商,模型,操作类型聚合统计成本.
 	InsertModelUsage(ctx context.Context, usage ModelUsage) error
 
+	// GetPriceSnapshot 查询指定供应商+模型在指定时间点的有效价格快照.
+	// 找不到返回 ErrPriceNotFound, 方便调用方决定是跳过费用估算还是报错.
+	GetPriceSnapshot(ctx context.Context, provider, model string, at time.Time) (ModelPriceSnapshot, error)
+
+	// UpsertModelUsageDaily 把一条原始 model_usages 记录聚合到日表.
+	// 幂等: 同一聚合键(date+device+user+provider+model+operation)存在就累加, 不存在就插入.
+	// 方案 15.7 节: 原始用量写入成功后通过幂等聚合任务更新日表.
+	UpsertModelUsageDaily(ctx context.Context, usage ModelUsage) error
+
+	// GetDailyUsage 按日期范围查日聚合数据, 供看板查询.
+	// 返回按日期倒序排列的日聚合记录.
+	GetDailyUsage(ctx context.Context, dateFrom, dateTo string) ([]ModelUsageDaily, error)
+
 	// GetAppSetting 按键名读普通配置.
 	GetAppSetting(ctx context.Context, key string) (AppSetting, error)
 	// CreateAppSettingIfAbsent 只在配置不存在时写入默认值.
@@ -133,6 +150,38 @@ type Repository interface {
 	// InsertSpan 保存一条 Span 记录,记录请求经过的一个处理步骤.
 	// 多个 Span 共享同一个 trace_id,通过 parent_span_id 组成调用链树.
 	InsertSpan(ctx context.Context, span Span) error
+
+	// ===== 长期记忆: 候选管理 =====
+
+	// InsertMemoryCandidate 创建一条记忆候选.
+	// 对话产生候选后调, status 初始为 pending.
+	InsertMemoryCandidate(ctx context.Context, c MemoryCandidate) (MemoryCandidate, error)
+	// GetMemoryCandidate 按 ID 查一条候选.
+	GetMemoryCandidate(ctx context.Context, id int64) (MemoryCandidate, error)
+	// GetMemoryCandidates 按用户 ID 和状态查候选列表.
+	// status 为空时查所有状态, 按创建时间倒序返回.
+	GetMemoryCandidates(ctx context.Context, userID int64, status string) ([]MemoryCandidate, error)
+	// ConfirmMemoryCandidate 把候选状态从 pending 改成 confirmed, 同时写入正式记忆.
+	// 返回新建的 Memory 记录.
+	ConfirmMemoryCandidate(ctx context.Context, id int64, userID int64) (Memory, error)
+	// RejectMemoryCandidate 把候选状态从 pending 改成 rejected.
+	RejectMemoryCandidate(ctx context.Context, id int64) error
+
+	// ===== 长期记忆: 正式记忆管理 =====
+
+	// InsertMemory 创建一条正式记忆, 通常由 ConfirmMemoryCandidate 内部调.
+	InsertMemory(ctx context.Context, m Memory) (Memory, error)
+	// GetMemory 按 ID 查一条记忆.
+	GetMemory(ctx context.Context, id int64) (Memory, error)
+	// GetMemories 按用户 ID 查正式记忆列表, 只返回 status=active 的记录.
+	GetMemories(ctx context.Context, userID int64) ([]Memory, error)
+	// SearchMemories 按用户 ID + 关键词检索记忆, 只搜 status=active 的记录.
+	// 第一版用 LIKE, 不用向量.
+	SearchMemories(ctx context.Context, userID int64, keywords string, limit int) ([]Memory, error)
+	// UpdateMemory 编辑记忆内容和关键词, 同时写一条版本记录到 memory_versions.
+	UpdateMemory(ctx context.Context, id int64, content, keywords string) (Memory, error)
+	// DeleteMemory 软删记忆(status=deleted), 同时写一条 tombstone.
+	DeleteMemory(ctx context.Context, id int64, userID int64) error
 
 	// Close 关闭数据库连接.
 	Close() error
@@ -677,6 +726,138 @@ type ormSpan struct {
 // TableName 指定 spans 表名,不靠 GORM 的复数命名规则.
 func (ormSpan) TableName() string { return "spans" }
 
+// ModelPriceSnapshot 是一条模型价格快照(业务对象).
+// 方案 15.3 节: 价格会变化, 每条 model_usages 记录保存调用时使用的价格版本和估算结果.
+// 查询时按 provider + model + effective_from 找到调用时点的有效价格.
+type ModelPriceSnapshot struct {
+	// ID 数据库自增主键
+	ID int64
+	// Provider 供应商名称, 如 "deepseek", "openai"
+	Provider string
+	// Model 模型名, 如 "deepseek-chat"
+	Model string
+	// EffectiveFrom 价格生效时间
+	EffectiveFrom time.Time
+	// InputPrice 输入 Token 单价(每百万 Token)
+	InputPrice *float64
+	// OutputPrice 输出 Token 单价(每百万 Token)
+	OutputPrice *float64
+	// CachedInputPrice 缓存命中输入 Token 单价(比正常输入便宜)
+	CachedInputPrice *float64
+	// CacheCreationPrice 创建缓存的单价(Anthropic 概念)
+	CacheCreationPrice *float64
+	// Unit 计价单位, 如 "per_million_tokens"
+	Unit string
+	// Currency 币种, 如 "CNY", "USD"
+	Currency string
+	// SourceVersion 价格来源版本标识, 方便追溯是哪次更新
+	SourceVersion string
+	// CreatedAt 记录创建时间
+	CreatedAt time.Time
+}
+
+// ormModelPriceSnapshot 是 model_price_snapshots 表的 GORM ORM 模型.
+// 价格字段用指针类型(*float64), 允许 NULL(供应商没公布某项价格时为 NULL).
+type ormModelPriceSnapshot struct {
+	// ID 自增主键
+	ID int64 `gorm:"primaryKey;autoIncrement"`
+	// Provider 供应商名称, 不允许空, 复合索引第一列
+	Provider string `gorm:"not null;index:idx_price_snapshots_provider_model_time,priority:1;index:idx_price_snapshots_provider_model,priority:1"`
+	// Model 模型名, 不允许空, 复合索引第二列
+	Model string `gorm:"not null;index:idx_price_snapshots_provider_model_time,priority:2;index:idx_price_snapshots_provider_model,priority:2"`
+	// EffectiveFrom 价格生效时间, 不允许空, 复合索引第三列(倒序)
+	EffectiveFrom time.Time `gorm:"not null;index:idx_price_snapshots_provider_model_time,priority:3:desc"`
+	// InputPrice 输入 Token 单价, 允许 NULL
+	InputPrice *float64
+	// OutputPrice 输出 Token 单价, 允许 NULL
+	OutputPrice *float64
+	// CachedInputPrice 缓存命中输入 Token 单价, 允许 NULL
+	CachedInputPrice *float64
+	// CacheCreationPrice 创建缓存的单价, 允许 NULL
+	CacheCreationPrice *float64
+	// Unit 计价单位, 不允许空
+	Unit string `gorm:"not null"`
+	// Currency 币种, 不允许空
+	Currency string `gorm:"not null"`
+	// SourceVersion 价格来源版本标识, 允许 NULL
+	SourceVersion *string
+	// CreatedAt 记录创建时间, 不允许空
+	CreatedAt time.Time `gorm:"not null;index:idx_price_snapshots_provider_model,priority:3:desc"`
+}
+
+// TableName 指定 model_price_snapshots 表名, 不靠 GORM 的复数命名规则.
+func (ormModelPriceSnapshot) TableName() string { return "model_price_snapshots" }
+
+// ModelUsageDaily 是一条日聚合记录(业务对象).
+// 方案 15.7 节: 大范围查询使用预聚合表, 不能每次扫描原始事件 JSON.
+// 原始用量写入成功后通过幂等聚合任务更新日表.
+// 聚合粒度: date + device_id + user_id + provider + model + operation.
+type ModelUsageDaily struct {
+	// ID 数据库自增主键
+	ID int64
+	// Date 聚合日期, 格式 YYYY-MM-DD
+	Date string
+	// DeviceID 设备 ID(阶段 4+ 才有, 目前空字符串)
+	DeviceID string
+	// UserID 用户 ID, 0 表示不关联用户
+	UserID int64
+	// Provider 供应商名称
+	Provider string
+	// Model 模型名
+	Model string
+	// Operation 操作类型: chat/embedding/vision/asr/tts
+	Operation string
+	// RequestCount 请求总数
+	RequestCount int64
+	// FailedCount 失败请求数
+	FailedCount int64
+	// InputTokens 输入 Token 总量
+	InputTokens int64
+	// OutputTokens 输出 Token 总量
+	OutputTokens int64
+	// CachedInputTokens 缓存命中输入 Token 总量
+	CachedInputTokens int64
+	// EstimatedCostMicros 估算费用总额, 无价格快照时为 nil
+	EstimatedCostMicros *int64
+	// Currency 币种, 无费用估算时为空
+	Currency string
+}
+
+// ormModelUsageDaily 是 model_usage_daily 表的 GORM ORM 模型.
+type ormModelUsageDaily struct {
+	// ID 自增主键
+	ID int64 `gorm:"primaryKey;autoIncrement"`
+	// Date 聚合日期, 不允许空
+	Date string `gorm:"not null;index:idx_usage_daily_date;index:idx_usage_daily_provider_model,priority:3;index:idx_usage_daily_user,priority:2"`
+	// DeviceID 设备 ID, 允许 NULL
+	DeviceID *string
+	// UserID 用户 ID, 允许 NULL
+	UserID *int64 `gorm:"index:idx_usage_daily_user,priority:1"`
+	// Provider 供应商名称, 不允许空
+	Provider string `gorm:"not null;index:idx_usage_daily_provider_model,priority:1"`
+	// Model 模型名, 不允许空
+	Model string `gorm:"not null;index:idx_usage_daily_provider_model,priority:2"`
+	// Operation 操作类型, 不允许空
+	Operation string `gorm:"not null"`
+	// RequestCount 请求总数, 不允许空, 默认 0
+	RequestCount int64 `gorm:"not null;default:0"`
+	// FailedCount 失败请求数, 不允许空, 默认 0
+	FailedCount int64 `gorm:"not null;default:0"`
+	// InputTokens 输入 Token 总量, 不允许空, 默认 0
+	InputTokens int64 `gorm:"not null;default:0"`
+	// OutputTokens 输出 Token 总量, 不允许空, 默认 0
+	OutputTokens int64 `gorm:"not null;default:0"`
+	// CachedInputTokens 缓存命中输入 Token 总量, 不允许空, 默认 0
+	CachedInputTokens int64 `gorm:"not null;default:0"`
+	// EstimatedCostMicros 估算费用总额, 允许 NULL
+	EstimatedCostMicros *int64
+	// Currency 币种, 允许 NULL
+	Currency *string
+}
+
+// TableName 指定 model_usage_daily 表名, 不靠 GORM 的复数命名规则.
+func (ormModelUsageDaily) TableName() string { return "model_usage_daily" }
+
 // 下面是各表的列名常量,SELECT 查询用显式列名,不用 SELECT *.
 // 好处:表加列不会意外查出不需要的数据;列顺序稳定;SQL 日志清晰.
 const (
@@ -703,4 +884,259 @@ const (
 
 	// spans 表列名
 	spanColumns = "id, trace_id, parent_span_id, component, operation, status, duration_ms, started_at, finished_at, attributes"
+
+	// model_usages 表列名
+	modelUsageColumns = "id, request_id, trace_id, session_id, user_id, device_id, provider, model, operation, input_tokens, output_tokens, cached_input_tokens, cache_miss_tokens, cache_creation_tokens, reasoning_tokens, total_tokens, input_audio_seconds, output_audio_seconds, input_image_count, currency, estimated_cost_micros, provider_request_id, status, duration_ms, occurred_at"
+
+	// model_price_snapshots 表列名
+	modelPriceSnapshotColumns = "id, provider, model, effective_from, input_price, output_price, cached_input_price, cache_creation_price, unit, currency, source_version, created_at"
+
+	// model_usage_daily 表列名
+	modelUsageDailyColumns = "id, date, device_id, user_id, provider, model, operation, request_count, failed_count, input_tokens, output_tokens, cached_input_tokens, estimated_cost_micros, currency"
+
+	// memory_candidates 表列名
+	memoryCandidateColumns = "id, user_id, session_id, trace_id, content, memory_type, source, reason, usage_hint, status, created_at, resolved_at"
+
+	// memories 表列名
+	memoryColumns = "id, user_id, candidate_id, source_session_id, content, memory_type, keywords, sync_version, status, created_at, updated_at"
+
+	// memory_versions 表列名
+	memoryVersionColumns = "id, memory_id, version, content, keywords, edited_by, created_at"
+
+	// memory_tombstones 表列名
+	memoryTombstoneColumns = "id, memory_id, user_id, sync_version, deleted_at"
 )
+
+// ============================================================
+// 长期记忆相关业务对象和 ORM 模型
+// 方案 16.11 节: 受控长期记忆
+// ============================================================
+
+// 下面是记忆候选状态常量.
+const (
+	// MemoryCandidateStatusPending 表示候选等待用户确认.
+	MemoryCandidateStatusPending = "pending"
+	// MemoryCandidateStatusConfirmed 表示用户已确认, 对应的正式记忆已写入 memories 表.
+	MemoryCandidateStatusConfirmed = "confirmed"
+	// MemoryCandidateStatusRejected 表示用户已拒绝, 不会写入正式记忆.
+	MemoryCandidateStatusRejected = "rejected"
+)
+
+// 下面是正式记忆状态常量.
+const (
+	// MemoryStatusActive 表示记忆处于活跃状态, 检索时能查到.
+	MemoryStatusActive = "active"
+	// MemoryStatusDeleted 表示记忆已被软删, 检索时不会返回.
+	MemoryStatusDeleted = "deleted"
+)
+
+// 下面是记忆类型常量.
+const (
+	// MemoryTypePreference 表示用户偏好, 如"喜欢简短的回答".
+	MemoryTypePreference = "preference"
+	// MemoryTypeFact 表示事实信息, 如"用户是程序员".
+	MemoryTypeFact = "fact"
+	// MemoryTypeInstruction 表示指令性记忆, 如"回答时附带代码示例".
+	MemoryTypeInstruction = "instruction"
+	// MemoryTypePersona 表示用户人设, 如"用户是小米笔记本用户".
+	MemoryTypePersona = "persona"
+)
+
+// 下面是候选来源常量.
+const (
+	// MemoryCandidateSourceRule 表示候选由确定性规则产生.
+	MemoryCandidateSourceRule = "rule"
+	// MemoryCandidateSourceModel 表示候选由模型建议产生.
+	MemoryCandidateSourceModel = "model"
+)
+
+// MemoryCandidate 是一条记忆候选(业务对象).
+// 方案 16.11.3 节: 用户说的话不会直接写 memories, 而是先产生 pending 候选,
+// 等用户确认后才写正式记忆.
+type MemoryCandidate struct {
+	// ID 数据库自增主键
+	ID int64
+	// UserID 哪个用户的候选
+	UserID int64
+	// SessionID 来源会话 ID
+	SessionID string
+	// TraceID 来源对话的 trace ID, 方便回溯
+	TraceID string
+	// Content 候选记忆内容, 比如"用户喜欢简短的回答"
+	Content string
+	// MemoryType 记忆类型: preference/fact/instruction/persona
+	MemoryType string
+	// Source 来源: rule(规则产生) / model(模型建议)
+	Source string
+	// Reason 为什么建议保存, 给用户看的解释
+	Reason string
+	// UsageHint 保存后可能如何使用, 给用户看的解释
+	UsageHint string
+	// Status 状态: pending/confirmed/rejected
+	Status string
+	// CreatedAt 创建时间
+	CreatedAt time.Time
+	// ResolvedAt 确认或拒绝时间, 零值表示未处理
+	ResolvedAt time.Time
+}
+
+// ormMemoryCandidate 是 memory_candidates 表的 GORM ORM 模型.
+type ormMemoryCandidate struct {
+	// ID 自增主键
+	ID int64 `gorm:"primaryKey;autoIncrement"`
+	// UserID 用户 ID, 不允许空
+	UserID int64 `gorm:"not null;index:idx_memory_candidates_user_status,priority:1"`
+	// SessionID 来源会话 ID, 不允许空
+	SessionID string `gorm:"not null"`
+	// TraceID 来源对话的 trace ID, 允许 NULL
+	TraceID *string `gorm:"index:idx_memory_candidates_trace"`
+	// Content 候选记忆内容, 不允许空
+	Content string `gorm:"not null"`
+	// MemoryType 记忆类型, 不允许空
+	MemoryType string `gorm:"not null"`
+	// Source 来源, 不允许空, 默认 rule
+	Source string `gorm:"not null;default:rule"`
+	// Reason 为什么建议保存, 不允许空, 默认空串
+	Reason string `gorm:"not null;default:''"`
+	// UsageHint 保存后可能如何使用, 不允许空, 默认空串
+	UsageHint string `gorm:"not null;default:''"`
+	// Status 状态, 不允许空, 默认 pending
+	Status string `gorm:"not null;default:pending;index:idx_memory_candidates_user_status,priority:2"`
+	// CreatedAt 创建时间, 不允许空
+	CreatedAt time.Time `gorm:"not null;index:idx_memory_candidates_user_status,priority:3:desc"`
+	// ResolvedAt 确认或拒绝时间, 允许 NULL
+	ResolvedAt *time.Time
+}
+
+// TableName 指定 memory_candidates 表名, 不靠 GORM 的复数命名规则.
+func (ormMemoryCandidate) TableName() string { return "memory_candidates" }
+
+// Memory 是一条正式记忆(业务对象).
+// 只有用户确认的候选才能写入 memories.
+// 检索时只查 status=active 的记录.
+type Memory struct {
+	// ID 数据库自增主键
+	ID int64
+	// UserID 哪个用户的记忆
+	UserID int64
+	// CandidateID 来源候选 ID, 0 表示手动创建
+	CandidateID int64
+	// SourceSessionID 来源会话 ID
+	SourceSessionID string
+	// Content 记忆内容
+	Content string
+	// MemoryType 记忆类型: preference/fact/instruction/persona
+	MemoryType string
+	// Keywords 关键词, 空格分隔, 用于检索
+	Keywords string
+	// SyncVersion 同步版本号, C++ 设备同步用, 本阶段为 0
+	SyncVersion int
+	// Status 状态: active/deleted
+	Status string
+	// CreatedAt 创建时间
+	CreatedAt time.Time
+	// UpdatedAt 最后编辑时间
+	UpdatedAt time.Time
+}
+
+// ormMemory 是 memories 表的 GORM ORM 模型.
+type ormMemory struct {
+	// ID 自增主键
+	ID int64 `gorm:"primaryKey;autoIncrement"`
+	// UserID 用户 ID, 不允许空
+	UserID int64 `gorm:"not null;index:idx_memories_user,priority:1;index:idx_memories_user_type,priority:1;index:idx_memories_user_keywords,priority:1"`
+	// CandidateID 来源候选 ID, 允许 NULL
+	CandidateID *int64
+	// SourceSessionID 来源会话 ID, 允许 NULL
+	SourceSessionID *string
+	// Content 记忆内容, 不允许空
+	Content string `gorm:"not null"`
+	// MemoryType 记忆类型, 不允许空
+	MemoryType string `gorm:"not null;index:idx_memories_user_type,priority:2"`
+	// Keywords 关键词, 不允许空, 默认空串
+	Keywords string `gorm:"not null;default:''"`
+	// SyncVersion 同步版本号, 不允许空, 默认 0
+	SyncVersion int `gorm:"not null;default:0"`
+	// Status 状态, 不允许空, 默认 active
+	Status string `gorm:"not null;default:active;index:idx_memories_user,priority:2;index:idx_memories_user_type,priority:3;index:idx_memories_user_keywords,priority:2"`
+	// CreatedAt 创建时间, 不允许空
+	CreatedAt time.Time `gorm:"not null"`
+	// UpdatedAt 最后编辑时间, 不允许空
+	UpdatedAt time.Time `gorm:"not null;index:idx_memories_user,priority:3:desc"`
+}
+
+// TableName 指定 memories 表名, 不靠 GORM 的复数命名规则.
+func (ormMemory) TableName() string { return "memories" }
+
+// MemoryVersion 是一条记忆编辑版本记录(业务对象).
+// 用户编辑记忆内容时, 旧版本存到这里, 方便回溯修改历史.
+type MemoryVersion struct {
+	// ID 数据库自增主键
+	ID int64
+	// MemoryID 哪条记忆的版本
+	MemoryID int64
+	// Version 版本号, 从 1 开始递增
+	Version int
+	// Content 该版本的内容
+	Content string
+	// Keywords 该版本的关键词
+	Keywords string
+	// EditedBy 编辑者: user/system
+	EditedBy string
+	// CreatedAt 该版本的创建时间
+	CreatedAt time.Time
+}
+
+// ormMemoryVersion 是 memory_versions 表的 GORM ORM 模型.
+type ormMemoryVersion struct {
+	// ID 自增主键
+	ID int64 `gorm:"primaryKey;autoIncrement"`
+	// MemoryID 哪条记忆的版本, 不允许空
+	MemoryID int64 `gorm:"not null;index:idx_memory_versions_memory,priority:1"`
+	// Version 版本号, 不允许空
+	Version int `gorm:"not null;index:idx_memory_versions_memory,priority:2:desc"`
+	// Content 该版本的内容, 不允许空
+	Content string `gorm:"not null"`
+	// Keywords 该版本的关键词, 不允许空, 默认空串
+	Keywords string `gorm:"not null;default:''"`
+	// EditedBy 编辑者, 不允许空, 默认 user
+	EditedBy string `gorm:"not null;default:user"`
+	// CreatedAt 创建时间, 不允许空
+	CreatedAt time.Time `gorm:"not null"`
+}
+
+// TableName 指定 memory_versions 表名, 不靠 GORM 的复数命名规则.
+func (ormMemoryVersion) TableName() string { return "memory_versions" }
+
+// MemoryTombstone 是一条记忆删除标记(业务对象).
+// 方案 16.11.4 节: 删除记忆后普通查询和缓存都不再返回它.
+// tombstone 防止已删除的记忆通过同步机制重新出现.
+type MemoryTombstone struct {
+	// ID 数据库自增主键
+	ID int64
+	// MemoryID 被删除的记忆 ID
+	MemoryID int64
+	// UserID 哪个用户删的
+	UserID int64
+	// SyncVersion 删除时的同步版本号
+	SyncVersion int
+	// DeletedAt 删除时间
+	DeletedAt time.Time
+}
+
+// ormMemoryTombstone 是 memory_tombstones 表的 GORM ORM 模型.
+type ormMemoryTombstone struct {
+	// ID 自增主键
+	ID int64 `gorm:"primaryKey;autoIncrement"`
+	// MemoryID 被删除的记忆 ID, 不允许空
+	MemoryID int64 `gorm:"not null"`
+	// UserID 哪个用户删的, 不允许空
+	UserID int64 `gorm:"not null;index:idx_memory_tombstones_user,priority:1"`
+	// SyncVersion 删除时的同步版本号, 不允许空, 默认 0
+	SyncVersion int `gorm:"not null;default:0"`
+	// DeletedAt 删除时间, 不允许空
+	DeletedAt time.Time `gorm:"not null;index:idx_memory_tombstones_user,priority:2:desc"`
+}
+
+// TableName 指定 memory_tombstones 表名, 不靠 GORM 的复数命名规则.
+func (ormMemoryTombstone) TableName() string { return "memory_tombstones" }

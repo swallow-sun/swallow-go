@@ -10,7 +10,7 @@ import (
 	"github.com/swallow-sun/swallow-go/biz/service"
 )
 
-// Deps 是 handler 层的依赖集合, 持有三个 Service.
+// Deps 是 handler 层的依赖集合, 持有五个 Service.
 // handler 通过 Service 间接访问数据层, 跟 HTTP 解析和业务逻辑分开.
 // Deps 在程序启动时由 main.go 构造, 所有 handler 方法都挂在 *Deps 上.
 type Deps struct {
@@ -20,6 +20,10 @@ type Deps struct {
 	session *service.SessionService
 	// history 持有 *service.HistoryService, 负责查询对话历史
 	history *service.HistoryService
+	// dashboard 持有 *service.DashboardService, 负责看板查询(只读聚合)
+	dashboard *service.DashboardService
+	// memory 持有 *service.MemoryService, 负责长期记忆候选和正式记忆管理
+	memory *service.MemoryService
 }
 
 // createSessionReq 是 POST /api/session 的请求体.

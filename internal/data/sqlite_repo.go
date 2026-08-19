@@ -117,9 +117,6 @@ func (r *sqliteRepo) UpdateUserActive(ctx context.Context, id int64) error {
 		)
 		return fmt.Errorf("update user active: %w", err)
 	}
-	logger.Debug("users update succeeded",
-		zap.Int64("user_id", id),
-	)
 	return nil
 }
 
@@ -177,9 +174,6 @@ func (r *sqliteRepo) UpdateSessionActive(ctx context.Context, sessionID string) 
 		)
 		return fmt.Errorf("update session active: %w", err)
 	}
-	logger.Debug("sessions update succeeded",
-		zap.String("session_id", sessionID),
-	)
 	return nil
 }
 

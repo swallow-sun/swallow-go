@@ -116,10 +116,6 @@ func (r *sqliteRepo) MarkChatRequestRunning(ctx context.Context, requestID int64
 		return fmt.Errorf("mark chat request %d running: invalid current status", requestID)
 	}
 
-	logger.Debug("chat_requests update succeeded → running",
-		zap.Int64("request_id", requestID),
-		zap.Any("updates", updates),
-	)
 	return nil
 }
 
@@ -162,10 +158,6 @@ func (r *sqliteRepo) CompleteChatRequest(ctx context.Context, requestID int64, a
 		return fmt.Errorf("complete chat request %d: invalid current status", requestID)
 	}
 
-	logger.Debug("chat_requests update succeeded → completed",
-		zap.Int64("request_id", requestID),
-		zap.Any("updates", updates),
-	)
 	return nil
 }
 
@@ -199,9 +191,5 @@ func (r *sqliteRepo) FailChatRequest(ctx context.Context, requestID int64, error
 		return fmt.Errorf("fail chat request %d: invalid current status", requestID)
 	}
 
-	logger.Debug("chat_requests update succeeded → failed",
-		zap.Int64("request_id", requestID),
-		zap.Any("updates", updates),
-	)
 	return nil
 }

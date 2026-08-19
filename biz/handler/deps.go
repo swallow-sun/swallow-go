@@ -45,12 +45,13 @@ func NewDeps(cfg *config.Config, repo data.Repository) *Deps {
 		}),
 	)
 
-	// 用 svcDeps 创建三个 Service, 装进 Deps 结构体返回.
-	// service.NewChatService / NewSessionService / NewHistoryService 各自接收同一个 svcDeps,
-	// 这样三个 Service 共用同一份底层依赖(同一个数据库连接, 同一个 LLM 客户端等)
+	// 用 svcDeps 创建五个 Service, 装进 Deps 结构体返回.
+	// 五个 Service 共用同一份底层依赖(同一个数据库连接, 同一个 LLM 客户端等)
 	return &Deps{
-		chat:    service.NewChatService(svcDeps), // ChatService 处理 /api/chat 流式对话
-		session: service.NewSessionService(svcDeps), // SessionService 处理 /api/session 会话创建
-		history: service.NewHistoryService(svcDeps), // HistoryService 处理 /api/history 历史查询
+		chat:      service.NewChatService(svcDeps),       // ChatService 处理 /api/chat 流式对话
+		session:   service.NewSessionService(svcDeps),   // SessionService 处理 /api/session 会话创建
+		history:   service.NewHistoryService(svcDeps),  // HistoryService 处理 /api/history 历史查询
+		dashboard: service.NewDashboardService(svcDeps), // DashboardService 处理 /api/v1/dashboard 看板查询
+		memory:    service.NewMemoryService(svcDeps),    // MemoryService 处理 /api/v1/memory-candidates 和 /api/v1/memories 记忆管理
 	}
 }

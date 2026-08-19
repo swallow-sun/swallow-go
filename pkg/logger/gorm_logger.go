@@ -3,20 +3,24 @@
 // 做的事情:
 //  1. NewGORMLogger 创建适配器,GORM LogLevel 固定设 Info(最高级别,每条 SQL 都触发 Trace).
 //  2. 实现 gorm.io/gorm/logger.Interface 接口的 LogMode/Info/Error/Trace 四个方法.
-//  3. Trace 方法是核心:GORM 每执行一条 SQL 都会调它,把 SQL 语句,耗时,行数,错误转发到 logger.Debug.
+//  3. Trace 方法是核心:GORM 每执行一条 SQL 都会调它,按结果分三级转发:
+//     - 成功 → logger.Debug("[GORM] ...")
+//     - ErrRecordNotFound → logger.Debug("[GORM] ...")  (查不到记录是正常业务情况,不算错误)
+//     - 其他真实错误 → logger.Error("[GORM][ERR] ...")  (连接失败/约束冲突/语法错误等)
 //
 // 为什么 GORM LogLevel 固定 Info:
 //   GORM 的 LogLevel 只有 Silent(1)/Error(2)/Warn(3)/Info(4),没有 Debug.
 //   Info 是最高级别,GORM 会在 level=Info 时对每条 SQL 调 Trace 方法.
-//   Trace 里统一转发到 logger.Debug——开发环境 Debug 级别能看到 SQL,
-//   生产环境 Info 级别自然看不到,不需要在 GORM 层面分环境.
+//   Trace 里统一转发到 logger,由项目日志级别决定最终出不输出.
 package logger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
 
@@ -61,22 +65,35 @@ func (l *gormLogger) Error(ctx context.Context, msg string, data ...interface{})
 //   - fc:延迟求值函数,调它才能拿到 SQL 语句和行数
 //   - err:执行错误,nil 表示成功
 //
-// 我们把 SQL 语句,耗时,行数,错误信息组装成一条消息,转发到 logger.Debug.
-// 开发环境(Debug 级别)每条 SQL 都看得到,生产环境(Info 级别)自然看不到.
+// 三种情况分别转发到不同日志级别:
+//   - 成功(无错误) → Debug,前缀 [GORM]
+//   - ErrRecordNotFound → Debug,前缀 [GORM]  (查不到记录是正常业务,不算错误)
+//   - 其他真实错误(连接失败/约束冲突/语法错误等) → Error,前缀 [GORM][ERR]
 func (l *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (sql string, rowsAffected int64), err error) {
 	// fc() 是 GORM 传进来的延迟求值函数,调它才能拿到 SQL 语句和行数.
 	// GORM 用延迟求值是为了在日志级别不够时不执行格式化(省性能).
 	sql, rows := fc()
 
-	// elapsed := time.Since(begin) 算出这条 SQL 的执行耗时
+	// elapsed := time.Since(begin) 筗出这条 SQL 的执行耗时
 	elapsed := time.Since(begin)
 
-	// 拼一条人类可读的 SQL 日志消息,统一转发到 logger.Debug
+	// 三种情况分别处理:
+	//   1. err == nil: SQL 执行成功,打 Debug
+	//   2. err == gorm.ErrRecordNotFound: First()/Last() 查不到记录,正常业务情况,打 Debug
+	//   3. 其他错误: 真实 SQL 错误(连接失败/约束冲突/语法错误),打 Error
 	var msg string
-	if err != nil {
-		msg = fmt.Sprintf("[GORM][ERR] %s %s | rows=%d | err=%v", elapsed.String(), sql, rows, err)
-	} else {
+	switch {
+	case err == nil:
+		// 成功,不带错误信息
 		msg = fmt.Sprintf("[GORM] %s %s | rows=%d", elapsed.String(), sql, rows)
+		Debug(msg)
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		// 查不到记录,不是错误,前缀不带 [ERR]
+		msg = fmt.Sprintf("[GORM] %s %s | rows=%d | err=%v", elapsed.String(), sql, rows, err)
+		Debug(msg)
+	default:
+		// 真实错误,走 Error 级别
+		msg = fmt.Sprintf("[GORM][ERR] %s %s | rows=%d | err=%v", elapsed.String(), sql, rows, err)
+		Error(msg)
 	}
-	Debug(msg)
 }
