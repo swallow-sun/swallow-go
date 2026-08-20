@@ -78,7 +78,7 @@ func (d *Deps) RegisterDevice(ctx context.Context, c *app.RequestContext) {
 // GetCurrentDevice GET /api/v1/devices/me.
 // 请求头格式:Authorization: Device <device_id>.<token>.
 func (d *Deps) GetCurrentDevice(ctx context.Context, c *app.RequestContext) {
-	ctx, _ = trace.Ensure(ctx)
+	ctx, _ = trace.EnsureFromHeader(ctx, string(c.GetHeader("X-Trace-Id")))
 	registered, ok := d.authenticateDevice(ctx, c)
 	if !ok {
 		return
@@ -89,7 +89,7 @@ func (d *Deps) GetCurrentDevice(ctx context.Context, c *app.RequestContext) {
 // CreateDeviceSession POST /api/v1/device/session.
 // 设备身份决定 userID,请求体不能指定或覆盖用户归属.
 func (d *Deps) CreateDeviceSession(ctx context.Context, c *app.RequestContext) {
-	ctx, _ = trace.Ensure(ctx)
+	ctx, _ = trace.EnsureFromHeader(ctx, string(c.GetHeader("X-Trace-Id")))
 	registered, ok := d.authenticateDevice(ctx, c)
 	if !ok {
 		return
@@ -114,7 +114,7 @@ func (d *Deps) CreateDeviceSession(ctx context.Context, c *app.RequestContext) {
 // DeviceChat POST /api/v1/device/chat.
 // 设备只负责提供 session_id、client_message_id 和 message,其余聊天业务复用现有服务端链路.
 func (d *Deps) DeviceChat(ctx context.Context, c *app.RequestContext) {
-	ctx, _ = trace.Ensure(ctx)
+	ctx, _ = trace.EnsureFromHeader(ctx, string(c.GetHeader("X-Trace-Id")))
 	registered, ok := d.authenticateDevice(ctx, c)
 	if !ok {
 		return
