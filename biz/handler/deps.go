@@ -12,7 +12,9 @@ import (
 	"github.com/swallow-sun/swallow-go/internal/data"
 	"github.com/swallow-sun/swallow-go/internal/identity"
 	"github.com/swallow-sun/swallow-go/internal/memory"
+	"github.com/swallow-sun/swallow-go/internal/provider/asr"
 	"github.com/swallow-sun/swallow-go/internal/provider/llm"
+	"github.com/swallow-sun/swallow-go/internal/provider/tts"
 )
 
 // NewDeps 在 main.go 启动时调一次, 组装所有共享依赖.
@@ -45,6 +47,30 @@ func NewDeps(cfg *config.Config, repo data.Repository) *Deps {
 		}),
 	)
 
+	// 创建 ASR Provider (语音识别).
+	// 只有配置了 ASR 的 base_url 和 model 才创建, 否则为 nil, handler 里判空.
+	var asrProvider asr.Provider
+	if cfg.ASR.BaseURL != "" && cfg.ASR.Model != "" {
+		asrProvider = asr.NewOpenAICompat(asr.Config{
+			BaseURL: cfg.ASR.BaseURL,
+			APIKey:  cfg.ASR.APIKey,
+			Model:   cfg.ASR.Model,
+		})
+	}
+
+	// 创建 TTS Provider (语音合成).
+	// edge-tts 不需要 API key, 只要配置了 voice 就创建.
+	var ttsProvider tts.Provider
+	if cfg.TTS.Voice != "" {
+		ttsProvider = tts.NewEdge(tts.Config{
+			Voice:        cfg.TTS.Voice,
+			OutputFormat: cfg.TTS.OutputFormat,
+			Rate:         cfg.TTS.Rate,
+			Volume:       cfg.TTS.Volume,
+			Pitch:        cfg.TTS.Pitch,
+		})
+	}
+
 	// 用 svcDeps 创建六个 Service,装进 Deps 结构体返回.
 	// 六个 Service 共用同一份底层依赖(同一个数据库连接、同一个 LLM 客户端等).
 	return &Deps{
@@ -54,5 +80,7 @@ func NewDeps(cfg *config.Config, repo data.Repository) *Deps {
 		dashboard: service.NewDashboardService(svcDeps), // DashboardService 处理 /api/v1/dashboard 看板查询
 		memory:    service.NewMemoryService(svcDeps),    // MemoryService 处理 /api/v1/memory-candidates 和 /api/v1/memories 记忆管理
 		device:    service.NewDeviceService(svcDeps),    // DeviceService 处理设备注册和认证
+		asr:       asrProvider,                          // ASR Provider 处理设备语音识别
+		tts:       ttsProvider,                          // TTS Provider 处理设备语音合成
 	}
 }

@@ -22,10 +22,16 @@ const (
 	SettingLLMBaseURL = "llm.base_url"
 	// SettingLLMModel 是默认模型名的键名,存明文配置
 	SettingLLMModel   = "llm.model"
+	// SettingASRBaseURL 是 ASR 服务基础地址的键名,存明文配置
+	SettingASRBaseURL = "asr.base_url"
+	// SettingASRModel 是 ASR 模型名的键名,存明文配置
+	SettingASRModel   = "asr.model"
 	// SecretLLMAPIKey 是 LLM API 密钥的键名,存加密密文
 	SecretLLMAPIKey   = "llm.api_key"
 	// SecretOwnerToken 是主人令牌的键名,存加密密文
 	SecretOwnerToken  = "auth.owner_token"
+	// SecretASRAPIKey 是 ASR API 密钥的键名,存加密密文
+	SecretASRAPIKey   = "asr.api_key"
 
 	// ValueTypeString 表示配置值的类型是字符串
 	ValueTypeString     = "string"

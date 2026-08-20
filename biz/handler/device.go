@@ -20,6 +20,8 @@ import (
 	"github.com/swallow-sun/swallow-go/internal/apperror"
 	"github.com/swallow-sun/swallow-go/internal/data"
 	"github.com/swallow-sun/swallow-go/internal/device"
+	"github.com/swallow-sun/swallow-go/internal/provider/asr"
+	"github.com/swallow-sun/swallow-go/internal/provider/tts"
 	"github.com/swallow-sun/swallow-go/internal/trace"
 	"github.com/swallow-sun/swallow-go/pkg/logger"
 	"go.uber.org/zap"
@@ -178,4 +180,138 @@ func newDevicePublicResp(registered data.Device) devicePublicResp {
 		response.LastSeenAt = registered.LastSeenAt.Format(time.RFC3339Nano)
 	}
 	return response
+}
+
+// DeviceASR POST /api/v1/device/asr.
+// 设备上传音频, Go 转发给 ASR 供应商 (Groq Whisper), 返回识别出的文字.
+// 请求体是 binary 音频数据 (WAV/MP3 等), 不是 JSON.
+// 响应是 JSON {"text": "识别出的文字"}.
+func (d *Deps) DeviceASR(ctx context.Context, c *app.RequestContext) {
+	ctx, _ = trace.EnsureFromHeader(ctx, string(c.GetHeader("X-Trace-Id")))
+	registered, ok := d.authenticateDevice(ctx, c)
+	if !ok {
+		return
+	}
+
+	// 检查 ASR Provider 是否配置. 没配置直接返回 503.
+	if d.asr == nil {
+		logger.Warn("ASR provider not configured",
+			zap.String("trace_id", trace.FromContext(ctx)),
+			zap.String("device_id", registered.ID),
+		)
+		writeErrorFromCtx(ctx, c, apperror.ServiceUnavailable("ASR provider not configured", ""))
+		return
+	}
+
+	// 从请求体读取音频数据.
+	// 设备发的是 binary 音频 (WAV/MP3 等), 不是 JSON.
+	// Hertz 的 Body() 返回请求体的字节切片和错误.
+	audioData, err := c.Body()
+	if err != nil {
+		writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_audio", "failed to read audio body", ""))
+		return
+	}
+	if len(audioData) == 0 {
+		writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_audio", "audio body is empty", ""))
+		return
+	}
+
+	// 从 query 参数推断音频格式, 默认 wav.
+	audioFormat := c.Query("format")
+	if audioFormat == "" {
+		audioFormat = "wav"
+	}
+
+	// 调 ASR Provider 做语音识别.
+	resp, err := d.asr.Transcribe(ctx, asr.TranscribeRequest{
+		AudioData:   audioData,
+		AudioFormat: audioFormat,
+		Language:    "zh", // 中文语音, 帮助模型更准确识别
+	})
+	if err != nil {
+		logger.Error("ASR transcription failed",
+			zap.String("trace_id", trace.FromContext(ctx)),
+			zap.String("device_id", registered.ID),
+			zap.Int("audio_bytes", len(audioData)),
+			zap.Error(err),
+		)
+		writeErrorFromCtx(ctx, c, apperror.Internal(""))
+		return
+	}
+
+	logger.Debug("ASR transcription completed",
+		zap.String("trace_id", trace.FromContext(ctx)),
+		zap.String("device_id", registered.ID),
+		zap.Int("audio_bytes", len(audioData)),
+		zap.Int("text_chars", len(resp.Text)),
+	)
+
+	// 返回识别文字
+	c.JSON(consts.StatusOK, deviceASRResp{
+		Text: resp.Text,
+	})
+}
+
+// DeviceTTS POST /api/v1/device/tts.
+// 设备发送要合成语音的文字, Go 转发给 TTS 供应商 (edge-tts), 返回 MP3 音频.
+// 请求体是 JSON {"text": "要合成的文字"}.
+// 响应 body 是 binary MP3 音频, Content-Type: audio/mpeg.
+func (d *Deps) DeviceTTS(ctx context.Context, c *app.RequestContext) {
+	ctx, _ = trace.EnsureFromHeader(ctx, string(c.GetHeader("X-Trace-Id")))
+	registered, ok := d.authenticateDevice(ctx, c)
+	if !ok {
+		return
+	}
+
+	// 检查 TTS Provider 是否配置. 没配置直接返回 503.
+	if d.tts == nil {
+		logger.Warn("TTS provider not configured",
+			zap.String("trace_id", trace.FromContext(ctx)),
+			zap.String("device_id", registered.ID),
+		)
+		writeErrorFromCtx(ctx, c, apperror.ServiceUnavailable("TTS provider not configured", ""))
+		return
+	}
+
+	// 解析 JSON 请求体.
+	var req deviceTTSReq
+	if err := c.BindAndValidate(&req); err != nil {
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeInvalidRequestBody, "invalid request body", ""))
+		return
+	}
+	if req.Text == "" {
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMissingContent, "text is required", ""))
+		return
+	}
+	// 限制文本长度, 防止撑爆 TTS 服务.
+	if len(req.Text) > MaxMessageLength {
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(apperror.CodeMessageTooLong, "text is too long", ""))
+		return
+	}
+
+	// 调 TTS Provider 做语音合成.
+	resp, err := d.tts.Synthesize(ctx, tts.SynthesizeRequest{
+		Text: req.Text,
+	})
+	if err != nil {
+		logger.Error("TTS synthesis failed",
+			zap.String("trace_id", trace.FromContext(ctx)),
+			zap.String("device_id", registered.ID),
+			zap.Int("text_chars", len(req.Text)),
+			zap.Error(err),
+		)
+		writeErrorFromCtx(ctx, c, apperror.Internal(""))
+		return
+	}
+
+	logger.Debug("TTS synthesis completed",
+		zap.String("trace_id", trace.FromContext(ctx)),
+		zap.String("device_id", registered.ID),
+		zap.Int("text_chars", len(req.Text)),
+		zap.Int("audio_bytes", len(resp.AudioData)),
+	)
+
+	// 返回音频数据 (binary, 不是 JSON).
+	// 设备拿到 MP3 字节后直接播放.
+	c.Data(consts.StatusOK, "audio/mpeg", resp.AudioData)
 }

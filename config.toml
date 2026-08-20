@@ -53,3 +53,22 @@ pprof_port = 0
 # curl http://localhost:9100/metrics 能看到所有指标。
 # 生产环境需要 Prometheus 抓取时才开，否则保持 0。
 metrics_port = 0
+
+[asr]
+# 语音识别 (ASR) 配置.
+# 当前用 Groq Whisper, 兼容 OpenAI /v1/audio/transcriptions 接口.
+# Groq 免费额度大, 速度快, 适合开发阶段.
+provider = "groq"
+base_url = "https://api.groq.com/openai/v1"
+api_key  = ""
+model    = "whisper-large-v3"
+
+[tts]
+# 语音合成 (TTS) 配置.
+# 当前用 edge-tts, 微软免费 TTS, 不需要 API key.
+# 通过 WebSocket 调微软 Azure 语音服务, 中文音质好.
+voice         = "zh-CN-XiaoxiaoNeural"
+output_format = "audio-48khz-192kbitrate-mono-mp3"
+rate          = "+0%"
+volume        = "+0%"
+pitch         = "+0Hz"

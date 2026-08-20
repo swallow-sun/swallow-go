@@ -8,6 +8,8 @@ package handler
 
 import (
 	"github.com/swallow-sun/swallow-go/biz/service"
+	"github.com/swallow-sun/swallow-go/internal/provider/asr"
+	"github.com/swallow-sun/swallow-go/internal/provider/tts"
 )
 
 // 输入限制常量.
@@ -49,6 +51,12 @@ type Deps struct {
 	memory *service.MemoryService
 	// device 持有 *service.DeviceService,负责设备注册、认证和身份归属查询.
 	device *service.DeviceService
+	// asr 持有 ASR Provider, 负责语音识别 (音频转文字).
+	// 可能为 nil (未配置 ASR 时), handler 里需判空.
+	asr asr.Provider
+	// tts 持有 TTS Provider, 负责语音合成 (文字转音频).
+	// 可能为 nil (未配置 TTS 时), handler 里需判空.
+	tts tts.Provider
 }
 
 // registerDeviceReq 是主人注册嵌入式设备的请求体.
@@ -134,3 +142,20 @@ type historyResp struct {
 	SessionID string        `json:"session_id"` // 哪个会话的历史
 	Items     []historyItem `json:"items"`      // 对话记录列表, 按时间正序排列
 }
+
+// deviceASRResp 是 POST /api/v1/device/asr 的响应体.
+// 设备上传音频, Go 转发给 ASR 供应商, 返回识别出的文字.
+type deviceASRResp struct {
+	Text string `json:"text"` // 识别出的文字
+}
+
+// deviceTTSReq 是 POST /api/v1/device/tts 的请求体.
+// 设备发送要合成语音的文字, Go 转发给 TTS 供应商, 返回音频.
+type deviceTTSReq struct {
+	Text string `json:"text"` // 要合成语音的文字
+}
+
+// deviceTTSResp 是 POST /api/v1/device/tts 的响应体.
+// 音频数据以 binary 返回, 不放 JSON 里, 这里只有元信息.
+// 实际响应 Content-Type 是 audio/mpeg, body 是 MP3 音频字节.
+

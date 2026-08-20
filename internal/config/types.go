@@ -55,6 +55,10 @@ type Config struct {
 	Log LogConfig `toml:"log"`
 	// Memory 对应 [memory] 段,放长期记忆安全配置.
 	Memory MemoryConfig `toml:"memory"`
+	// ASR 对应 [asr] 段, 放语音识别 (ASR) 配置.
+	ASR ASRConfig `toml:"asr"`
+	// TTS 对应 [tts] 段, 放语音合成 (TTS) 配置.
+	TTS TTSConfig `toml:"tts"`
 	// LoadedSources 记录实际加载了哪些配置文件,方便排查"配置从哪来的"
 	// toml:"-" 的意思是:这个字段不参与 TOML 解析,不是从配置文件里读的,
 	// 而是代码在加载文件时自己往里 append 的
@@ -141,4 +145,33 @@ type DebugConfig struct {
 	// PProfPort 是 pprof HTTP 服务的监听端口,0 表示不启动
 	// 开发时设成非 0(如 6060),然后用 go tool pprof http://localhost:6060/debug/pprof/heap 抓堆快照
 	PProfPort int `toml:"pprof_port"` // pprof HTTP 端口,0=不启动
+}
+
+// ASRConfig 放语音识别 (ASR) 服务连接配置.
+// 当前用 Groq Whisper, 兼容 OpenAI /v1/audio/transcriptions 接口.
+type ASRConfig struct {
+	// Provider 是 ASR 供应商名称, 如 "groq"
+	Provider string `toml:"provider"` // ASR 供应商名称
+	// BaseURL 是 ASR 服务的 API 基础地址, 如 "https://api.groq.com/openai/v1"
+	// 后面的 /audio/transcriptions 路径由 provider 层自己拼
+	BaseURL string `toml:"base_url"` // ASR 服务的 API 基础地址
+	// APIKey 是调 ASR 用的密钥
+	APIKey string `toml:"api_key"` // ASR API 密钥
+	// Model 是 ASR 模型名, 如 "whisper-large-v3"
+	Model string `toml:"model"` // ASR 模型名
+}
+
+// TTSConfig 放语音合成 (TTS) 服务配置.
+// 当前用 edge-tts, 微软免费 TTS, 不需要 API key.
+type TTSConfig struct {
+	// Voice 是默认语音名称, 如 "zh-CN-XiaoxiaoNeural" (女声晓晓)
+	Voice string `toml:"voice"` // 默认语音名称
+	// OutputFormat 是音频输出格式, 如 "audio-48khz-192kbitrate-mono-mp3"
+	OutputFormat string `toml:"output_format"` // 音频输出格式
+	// Rate 是语速, 如 "+0%", "-10%", "+20%"
+	Rate string `toml:"rate"` // 语速
+	// Volume 是音量, 如 "+0%", "-50%"
+	Volume string `toml:"volume"` // 音量
+	// Pitch 是音调, 如 "+0Hz", "-50Hz"
+	Pitch string `toml:"pitch"` // 音调
 }

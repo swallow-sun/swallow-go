@@ -78,6 +78,9 @@ func Register(r *server.Hertz, deps *handler.Deps) {
 		// 设备云端能力 API:设备令牌认证后创建会话并调用共用云端模型链路.
 		v1.POST("/device/session", deps.CreateDeviceSession)
 		v1.POST("/device/chat", deps.DeviceChat)
+		// 设备语音 API:设备令牌认证后上传音频获取文字 (ASR) 或发送文字获取音频 (TTS).
+		v1.POST("/device/asr", deps.DeviceASR)
+		v1.POST("/device/tts", deps.DeviceTTS)
 	}
 }
 
