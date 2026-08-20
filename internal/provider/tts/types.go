@@ -51,9 +51,9 @@ type SynthesizeRequest struct {
 
 // SynthesizeResponse 是语音合成的结果.
 type SynthesizeResponse struct {
-	// AudioData 是合成后的音频字节切片 (MP3 格式)
+	// AudioData 是合成后的音频字节切片 (WAV 格式, 包含 WAV 头 + PCM 数据)
 	AudioData []byte
-	// AudioFormat 是音频格式, 如 "mp3"
+	// AudioFormat 是音频格式, 如 "wav"
 	AudioFormat string
 }
 
@@ -74,8 +74,10 @@ const (
 	// DefaultVoice 是默认语音 (中文女声晓晓).
 	DefaultVoice = "zh-CN-XiaoxiaoNeural"
 
-	// DefaultOutputFormat 是默认输出格式 (48kHz 192kbps MP3).
-	DefaultOutputFormat = "audio-48khz-192kbitrate-mono-mp3"
+	// DefaultOutputFormat 是默认输出格式 (16kHz 16-bit 单声道 PCM WAV).
+	// edge-tts 支持 "riff-16khz-16bit-mono-pcm" 格式, 输出的是裸 PCM 数据 (不带 WAV 头).
+	// Go 侧在 Synthesize 完成后自动加上 WAV 头, C++ 侧 waveOut 直接播放.
+	DefaultOutputFormat = "riff-16khz-16bit-mono-pcm"
 
 	// DefaultRate 是默认语速 (正常速度).
 	DefaultRate = "+0%"

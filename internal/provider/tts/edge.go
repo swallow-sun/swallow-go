@@ -6,10 +6,10 @@
 //
 // edge-tts 协议:
 //   - WebSocket 连接微软 Azure 语音服务的公开端点 (不需要 API key).
-//   - 连接后发两条文本消息: config (输出格式) 和 SSML (合成请求).
+//   - 连接后发两条文本消息: synthesis (输出格式) 和 ssml (合成请求).
 //   - 服务端返回文本消息 (Path: audio.metadata) 和二进制消息 (音频数据).
 //   - 二进制消息前 2 字节是大端序 uint16, 表示后面跟着的头部字符串的长度.
-//   - 头部里 Path:audio 表示这是音频数据, 截取头部后面的字节就是 MP3 音频.
+//   - 头部里 Path:audio 表示这是音频数据, 截取头部后面的字节就是 WAV 音频.
 //   - 收到 Path:Turn.off 表示合成结束, 关闭连接.
 package tts
 
@@ -75,8 +75,10 @@ func (p *EdgeTTS) Synthesize(ctx context.Context, req SynthesizeRequest) (Synthe
 	// 第二步: 发送 config 消息 (输出格式).
 	// edge-tts 协议要求先发一条 config 消息, 告诉服务端输出什么格式的音频.
 	// 消息格式: X-Timestamp...\r\nPath: synthesis\r\nContent-Type: application/json\r\n\r\n{...}
+	// edge-tts 协议要求发一条 synthesis 配置消息, 告诉服务端输出什么格式.
+	// Path 头必须是英文 "synthesis", 不能是中文.
 	configMsg := "X-Timestamp:SwallowTTS\r\n" +
-		"Path:配置\r\n" +
+		"Path:synthesis\r\n" +
 		"Content-Type:application/json\r\n\r\n" +
 		`{"context":{"synthesis":{"audio":{"metadata":{"timestamp":{"@type":"CanvasTime","Resolution":"MilliSeconds"}}}}}}`
 	// 用 WriteMessage 发送文本消息 (TextMessage = 1)
@@ -147,11 +149,52 @@ func (p *EdgeTTS) Synthesize(ctx context.Context, req SynthesizeRequest) (Synthe
 		return SynthesizeResponse{}, fmt.Errorf("no audio data received")
 	}
 
-	// 返回音频数据
+	// edge-tts 输出的是裸 PCM 数据 (riff-16khz-16bit-mono-pcm 格式), 不带 WAV 文件头.
+	// 需要手动加上 44 字节的 WAV 头, C++ 侧 waveOut API 才能正确解析和播放.
+	wavData := wrapWAVHeader(audioData, 16000, 16, 1)
+
+	// 返回音频数据 (WAV 格式, C++ 侧用 waveOut API 直接播放, 不需要 MP3 解码器)
 	return SynthesizeResponse{
-		AudioData:   audioData,
-		AudioFormat: "mp3",
+		AudioData:   wavData,
+		AudioFormat: "wav",
 	}, nil
+}
+
+// wrapWAVHeader 给裸 PCM 数据加上标准的 WAV 文件头 (44 字节).
+// 参数: sampleRate=采样率 (如 16000), bitsPerSample=位深 (如 16), channels=声道数 (1=单声道).
+// WAV 文件格式: "RIFF" + 文件大小 + "WAVE" + "fmt " + fmt 块大小 + PCM 格式参数 + "data" + 数据大小 + PCM 数据.
+func wrapWAVHeader(pcm []byte, sampleRate, bitsPerSample, channels int) []byte {
+	// 计算各种大小
+	numChannels := channels
+	byteRate := sampleRate * numChannels * bitsPerSample / 8
+	blockAlign := numChannels * bitsPerSample / 8
+	dataSize := len(pcm)
+	chunkSize := 36 + dataSize // RIFF chunk 大小 = 文件总大小 - 8
+
+	// 分配 WAV 头 + PCM 数据的空间
+	result := make([]byte, 44+len(pcm))
+
+	// RIFF 头
+	copy(result[0:4], []byte("RIFF"))
+	binary.LittleEndian.PutUint32(result[4:8], uint32(chunkSize))
+	copy(result[8:12], []byte("WAVE"))
+
+	// fmt 子块
+	copy(result[12:16], []byte("fmt "))
+	binary.LittleEndian.PutUint32(result[16:20], 16)       // fmt 块大小固定 16
+	binary.LittleEndian.PutUint16(result[20:22], 1)        // PCM 格式 = 1
+	binary.LittleEndian.PutUint16(result[22:24], uint16(numChannels))
+	binary.LittleEndian.PutUint32(result[24:28], uint32(sampleRate))
+	binary.LittleEndian.PutUint32(result[28:32], uint32(byteRate))
+	binary.LittleEndian.PutUint16(result[32:34], uint16(blockAlign))
+	binary.LittleEndian.PutUint16(result[34:36], uint16(bitsPerSample))
+
+	// data 子块
+	copy(result[36:40], []byte("data"))
+	binary.LittleEndian.PutUint32(result[40:44], uint32(dataSize))
+	copy(result[44:], pcm)
+
+	return result
 }
 
 // buildSSML 构造 SSML 请求消息.

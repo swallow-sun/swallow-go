@@ -68,7 +68,7 @@ model    = "whisper-large-v3"
 # 当前用 edge-tts, 微软免费 TTS, 不需要 API key.
 # 通过 WebSocket 调微软 Azure 语音服务, 中文音质好.
 voice         = "zh-CN-XiaoxiaoNeural"
-output_format = "audio-48khz-192kbitrate-mono-mp3"
+output_format = "riff-16khz-16bit-mono-pcm"
 rate          = "+0%"
 volume        = "+0%"
 pitch         = "+0Hz"

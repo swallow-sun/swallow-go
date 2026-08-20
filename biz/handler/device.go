@@ -311,7 +311,7 @@ func (d *Deps) DeviceTTS(ctx context.Context, c *app.RequestContext) {
 		zap.Int("audio_bytes", len(resp.AudioData)),
 	)
 
-	// 返回音频数据 (binary, 不是 JSON).
-	// 设备拿到 MP3 字节后直接播放.
-	c.Data(consts.StatusOK, "audio/mpeg", resp.AudioData)
+	// 返回音频数据 (binary WAV, 不是 JSON).
+	// 设备拿到 WAV 字节后用 waveOut API 直接播放.
+	c.Data(consts.StatusOK, "audio/wav", resp.AudioData)
 }
