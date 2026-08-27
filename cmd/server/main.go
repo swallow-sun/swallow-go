@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -29,6 +30,9 @@ import (
 	"github.com/swallow-sun/swallow-go/internal/settings"
 	"github.com/swallow-sun/swallow-go/internal/telemetry"
 	"github.com/swallow-sun/swallow-go/internal/trace"
+	"github.com/swallow-sun/swallow-go/internal/ttspython"
+
+	"google.golang.org/grpc"
 )
 
 func main() {
@@ -38,7 +42,7 @@ func main() {
 		// fmt.Fprintf 是 Go 标准库 fmt 包里的格式化输出函数,作用是把格式化后的字符串写到第一个参数指定的 writer 里
 		// 这里第一个参数 os.Stderr 是标准错误流(stderr),和 stdout 不同,stderr 专门用来输出错误信息
 		// %v 是通用格式化占位符,把 err 按默认格式填进去
-		fmt.Fprintf(os.Stderr, "program failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "程序运行失败: %v\n", err)
 		// os.Exit 是 Go 标准库 os 包里的函数,作用是立即终止程序,参数是退出码
 		// 0 表示正常退出,非 0 表示异常退出,这里传 1 表示程序跑失败了
 		// 注意:os.Exit 会立即退出,不会执行 defer,所以 defer 必须在 run() 里全部执行完
@@ -80,7 +84,7 @@ func run() (runErr error) {
 	// logger.AddFields 给全局 logger 加一些固定字段,之后每条日志都自动带上这些字段
 	// 这里把 startup_id 加进去,这样所有日志都带着这个启动 ID
 	logger.AddFields(zap.String("startup_id", startupID))
-	logger.Info("program starting",
+	logger.Info("程序启动",
 		zap.String("environment", cfg.App.Environment),
 		zap.String("log_level", cfg.Log.Level),
 		zap.String("log_directory", cfg.Log.Directory),
@@ -92,14 +96,14 @@ func run() (runErr error) {
 	// 遍历所有已经加载的配置文件路径,打 Debug 日志记录下来
 	// 举个例子,如果配了 config.toml + config.local.toml,这里会打两条日志
 	for _, source := range cfg.LoadedSources {
-		logger.Debug("loaded config file", zap.String("path", source))
+		logger.Debug("已加载配置文件", zap.String("path", source))
 	}
 
 	// 这个 defer 在 run 返回后才执行,如果 runErr 非 nil(也就是 run 失败了),打一条 Error 日志
 	// 注意执行顺序:这个 defer 在 logger.Sync() 之后注册,所以先执行(LIFO)
 	defer func() {
 		if runErr != nil {
-			logger.Error("program startup failed", zap.Error(runErr))
+			logger.Error("程序启动失败", zap.Error(runErr))
 		}
 	}()
 
@@ -174,17 +178,20 @@ func run() (runErr error) {
 		// telemetry.Shutdown 刷新所有还没写出去的埋点事件到数据库
 		// 传入 shutdownCtx,最多等 5 秒,超时就不再等了
 		if err := telemetry.Shutdown(shutdownCtx); err != nil {
-			logger.Error("telemetry shutdown failed", zap.Error(err))
+			logger.Error("埋点系统关闭失败", zap.Error(err))
 		}
 		// 埋点事件刷完,再关闭数据库连接
 		if err := repo.Close(); err != nil {
-			logger.Error("database close failed", zap.Error(err))
+			logger.Error("数据库关闭失败", zap.Error(err))
 		}
 	}()
 
 	// 4. 组装业务依赖(使用数据库加载并解密后的 llm 配置)
 	// 项目的依赖组装工厂——程序启动时调一次,把所有零件拼好塞进一个 Deps 结构体里,后续 handler 直接用
-	deps := handler.NewDeps(cfg, repo)
+	deps, err := handler.NewDeps(cfg, repo)
+	if err != nil {
+		return fmt.Errorf("initialize handlers failed: %w", err)
+	}
 
 	// 启动 pprof 调试服务(如果 config 里配了 pprof_port > 0)
 	// 返回 shutdown 函数,放到 defer 里在程序退出时优雅关闭
@@ -201,6 +208,35 @@ func run() (runErr error) {
 	metricsShutdown := metrics.Start(cfg.Metrics.MetricsPort)
 	if metricsShutdown != nil {
 		defer metricsShutdown()
+	}
+
+	// 启动 tts_server.py 子进程 (provider = "cosyvoice" 时生效).
+	// Python 解释器路径和脚本路径写死在 ttspython 包里, 不走配置.
+	// 子进程生命周期绑定到 ttsSupCtx, 程序退出时 cancel 触发 kill.
+	if cfg.TTS.Provider == "cosyvoice" {
+		port := cfg.TTS.CosyVoicePort
+		if port == 0 {
+			port = 9880
+		}
+		ttsSupCtx, ttsSupCancel := context.WithCancel(context.Background())
+		ttsSup, ttsErr := ttspython.Start(ttsSupCtx,
+			cfg.TTS.CosyVoiceModelDir,
+			cfg.TTS.CosyVoiceRefWav,
+			cfg.TTS.CosyVoiceRefText,
+			port,
+		)
+		if ttsErr != nil {
+			ttsSupCancel()
+			return fmt.Errorf("start tts_server.py: %w", ttsErr)
+		}
+		// 程序退出时先 kill Python 子进程.
+		defer func() {
+			logger.Info("正在停止 tts_server.py 子进程...")
+			ttsSupCancel()
+			// 给子进程 5 秒优雅退出.
+			<-time.After(5 * time.Second)
+		}()
+		_ = ttsSup // 不需要在后续代码中直接引用, 通过 HTTP 调用
 	}
 
 	// Hertz 框架自带一套日志系统(hlog),这里把它转发到项目唯一的全局 logger
@@ -223,7 +259,39 @@ func run() (runErr error) {
 	// 传入 deps 是因为 handler 需要 llm/memory/identity 等依赖
 	router.Register(httpServer, deps)
 
-	logger.Info("HTTP server started", zap.Int("port", cfg.Server.Port))
+	// 启动后台提醒调度器.
+	// 后台 goroutine 每隔 scan_interval_seconds 秒扫描一次 pending 且到期的提醒.
+	// deps.Reminder() 返回 ReminderService 指针, 调 StartScheduler 启动后台循环.
+	// context.Background() 作为根 context, 跟随进程生命周期.
+	if cfg.Reminder.ScanIntervalSeconds > 0 {
+		deps.Reminder().StartScheduler(context.Background(), cfg.Reminder.ScanIntervalSeconds)
+	}
+
+	// 启动 gRPC TTS 服务.
+	// gRPC 端口固定 9881, 和 HTTP 端口 8888 并行运行.
+	// gRPC 只用于 TTS 流式合成 (低延迟), 其他 API 仍走 HTTP.
+	grpcPort := 9881
+	if cfg.Server.GrpcPort > 0 {
+		grpcPort = cfg.Server.GrpcPort
+	}
+	grpcLis, err := net.Listen("tcp", fmt.Sprintf(":%d", grpcPort))
+	if err != nil {
+		return fmt.Errorf("gRPC listen failed: %w", err)
+	}
+	grpcServer := grpc.NewServer()
+	handler.RegisterTTSServer(grpcServer, deps)
+	go func() {
+		logger.Info("gRPC TTS 服务已启动", zap.Int("port", grpcPort))
+		if err := grpcServer.Serve(grpcLis); err != nil {
+			logger.Error("gRPC 服务已停止", zap.Error(err))
+		}
+	}()
+	defer func() {
+		logger.Info("正在停止 gRPC TTS 服务...")
+		grpcServer.GracefulStop()
+	}()
+
+	logger.Info("HTTP 服务已启动", zap.Int("port", cfg.Server.Port))
 	// httpServer.Spin 是 Hertz 框架提供的方法,作用是启动 HTTP 服务并阻塞当前 goroutine
 	// 开始监听端口,接收请求,处理请求,直到收到关闭信号才返回
 	// Spin 返回意味着服务要关闭了,接下来执行上面的 defer,最后 run 返回 nil

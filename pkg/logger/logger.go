@@ -19,6 +19,59 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+// emojiLevelEncoder 把日志级别编码成 emoji + 级别名, 开发环境更直观.
+// 生产环境不用这个, 用 JSON 编码器.
+func emojiLevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+	switch l {
+	case zapcore.DebugLevel:
+		enc.AppendString("🔍 调试")
+	case zapcore.InfoLevel:
+		enc.AppendString("ℹ️ 信息")
+	case zapcore.WarnLevel:
+		enc.AppendString("⚠️ 警告")
+	case zapcore.ErrorLevel:
+		enc.AppendString("❌ 错误")
+	default:
+		enc.AppendString(l.String())
+	}
+}
+
+// traceIDFilterCore 包装一个 zapcore.Core, 过滤掉 trace_id 字段.
+// 开发环境不需要 trace_id, 去掉后日志更干净.
+type traceIDFilterCore struct {
+	zapcore.Core
+}
+
+func (c *traceIDFilterCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
+	for _, f := range fields {
+		if f.Key == "trace_id" {
+			filtered := make([]zapcore.Field, 0, len(fields)-1)
+			for _, f2 := range fields {
+				if f2.Key != "trace_id" {
+					filtered = append(filtered, f2)
+				}
+			}
+			return c.Core.Write(ent, filtered)
+		}
+	}
+	return c.Core.Write(ent, fields)
+}
+
+func (c *traceIDFilterCore) With(fields []zapcore.Field) zapcore.Core {
+	for _, f := range fields {
+		if f.Key == "trace_id" {
+			filtered := make([]zapcore.Field, 0, len(fields)-1)
+			for _, f2 := range fields {
+				if f2.Key != "trace_id" {
+					filtered = append(filtered, f2)
+				}
+			}
+			return &traceIDFilterCore{Core: c.Core.With(filtered)}
+		}
+	}
+	return &traceIDFilterCore{Core: c.Core.With(fields)}
+}
+
 // global 是全局 logger 实例,Init 之后可用.
 // 全局变量,所有包通过 Info/Warn/Error/Debug 这些函数间接访问它.
 var global *zap.Logger
@@ -97,15 +150,41 @@ func Init(options ...Options) error {
 		LocalTime:  true,
 	}
 
-	// 编码器配置:用 JSON 格式,方便机器解析,开发和生产统一
-	encoderConfig := zap.NewProductionEncoderConfig()
-	// EncodeTime 用 ISO8601 格式,带时区,比默认的 epoch 毫秒好读
-	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	encoder := zapcore.NewJSONEncoder(encoderConfig)
+	// 编码器配置: 开发环境用文本格式 + emoji 级别, 生产环境用 JSON.
+	var consoleEncoder zapcore.Encoder
+	var fileEncoder zapcore.Encoder
+	isDev := environment == EnvironmentDevelopment
 
-	// 控制台和本地文件使用相同 JSON、级别和结构化字段，方便直接检索 startup_id/trace_id。
-	consoleCore := zapcore.NewCore(encoder, zapcore.Lock(os.Stdout), level)
-	fileCore := zapcore.NewCore(encoder.Clone(), zapcore.AddSync(logWriter), level)
+	if isDev {
+		// 开发环境: console 编码器 + emoji 级别, 更直观.
+		devConfig := zap.NewDevelopmentEncoderConfig()
+		devConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+		devConfig.EncodeLevel = emojiLevelEncoder
+		consoleEncoder = zapcore.NewConsoleEncoder(devConfig)
+		// 重新创建一份相同配置给文件编码器 (EncoderConfig 没有 Clone 方法).
+		fileConfig := zap.NewDevelopmentEncoderConfig()
+		fileConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+		fileConfig.EncodeLevel = emojiLevelEncoder
+		fileEncoder = zapcore.NewConsoleEncoder(fileConfig)
+	} else {
+		// 生产环境: JSON 编码器, 方便机器解析, 保留 trace_id (当前行为不变).
+		prodConfig := zap.NewProductionEncoderConfig()
+		prodConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+		consoleEncoder = zapcore.NewJSONEncoder(prodConfig)
+		prodConfig2 := zap.NewProductionEncoderConfig()
+		prodConfig2.EncodeTime = zapcore.ISO8601TimeEncoder
+		fileEncoder = zapcore.NewJSONEncoder(prodConfig2)
+	}
+
+	// 控制台和本地文件使用相同编码器和级别.
+	consoleCore := zapcore.NewCore(consoleEncoder, zapcore.Lock(os.Stdout), level)
+	fileCore := zapcore.NewCore(fileEncoder, zapcore.AddSync(logWriter), level)
+
+	// 开发环境过滤 trace_id, 日志更干净.
+	if isDev {
+		consoleCore = &traceIDFilterCore{Core: consoleCore}
+		fileCore = &traceIDFilterCore{Core: fileCore}
+	}
 	core := zapcore.NewTee(consoleCore, fileCore)
 
 	// zap.AddCallerSkip(1) 让 caller 往上跳一层,跳过 logger.Info/Warn/Error 封装函数,

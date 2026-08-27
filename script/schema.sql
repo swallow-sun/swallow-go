@@ -276,3 +276,28 @@ CREATE TABLE IF NOT EXISTS memory_tombstones (
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_tombstones_user ON memory_tombstones(user_id, deleted_at DESC);
+
+-- memory_sync_cursors：为每个用户分配跨记忆、删除标记共享的单调同步版本。
+CREATE TABLE IF NOT EXISTS memory_sync_cursors (
+    user_id INTEGER PRIMARY KEY,
+    next_version INTEGER NOT NULL DEFAULT 1
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_user_sync_version ON memories(user_id, sync_version) WHERE sync_version > 0;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_tombstones_user_sync_version ON memory_tombstones(user_id, sync_version) WHERE sync_version > 0;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_versions_memory_version ON memory_versions(memory_id, version);
+
+CREATE TABLE IF NOT EXISTS companion_states (
+    user_id INTEGER PRIMARY KEY,
+    concern REAL NOT NULL DEFAULT 0,
+    urgency REAL NOT NULL DEFAULT 0,
+    fondness REAL NOT NULL DEFAULT 0.5,
+    playfulness REAL NOT NULL DEFAULT 0.3,
+    allow_teasing INTEGER NOT NULL DEFAULT 1,
+    allow_strict_reminder INTEGER NOT NULL DEFAULT 1,
+    allow_affection INTEGER NOT NULL DEFAULT 1,
+    last_mode TEXT NOT NULL DEFAULT 'neutral',
+    current_task TEXT NOT NULL DEFAULT '',
+    task_updated_at DATETIME,
+    interaction_count INTEGER NOT NULL DEFAULT 0,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

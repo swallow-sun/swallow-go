@@ -5,9 +5,9 @@
 //  2. 定义 TranscribeRequest/TranscribeResponse 等请求/响应结构体.
 //  3. 定义 Config 配置结构体 (BaseURL/APIKey/Model).
 //
-// ASR = Automatic Speech Recognition, 语音转文字.
-// 当前用 Groq Whisper, 兼容 OpenAI /v1/audio/transcriptions 接口.
-// 换供应商只需改 base_url + api_key + model 三个配置.
+// ASR = Automatic Speech Recognition，语音转文字。
+// 当前支持阿里云 Qwen-ASR 和 multipart OpenAI 兼容供应商；
+// 具体实现由 [asr].provider 显式选择，不做跨供应商自动降级。
 package asr
 
 import (
@@ -17,12 +17,16 @@ import (
 	"net/http"
 )
 
-// Config 是 ASR Provider 的初始化配置.
-// 比如用 Groq Whisper 就是: BaseURL="https://api.groq.com/openai/v1", APIKey="gsk_xxx", Model="whisper-large-v3".
+// Config 是 ASR Provider 的初始化配置。
 type Config struct {
-	BaseURL string // API 基础地址, 如 https://api.groq.com/openai/v1, 后面拼 /audio/transcriptions
+	BaseURL string // API 基础地址，具体路径由所选 Provider 追加
 	APIKey  string // API 密钥, 放在 HTTP 头的 Authorization: Bearer gsk_xxx 里
-	Model   string // 模型名, 如 whisper-large-v3
+	Model   string // 模型名，如 qwen3-asr-flash 或 whisper-large-v3
+	// Language 是默认语种提示；auto 或空字符串表示自动检测。
+	Language string
+	// EnableITN 控制是否把中文数字、日期等口语结果规整成书面形式。
+	// 该选项目前由阿里云 Qwen-ASR 使用，其他 Provider 会忽略。
+	EnableITN bool
 }
 
 // Provider 是跟具体 ASR 供应商无关的调用接口.
@@ -49,16 +53,32 @@ type TranscribeResponse struct {
 	Text string
 	// Duration 是音频时长 (秒), 供应商没返回时为 0
 	Duration float64
+	// Language 是供应商检测到的语言，如 "zh"；未返回时为空。
+	Language string
+	// Emotion 是供应商识别到的语音情绪，如 "happy"；未返回时为空。
+	Emotion string
 }
 
-// OpenAICompat 是 OpenAI 兼容协议的 ASR 实现.
-// Groq Whisper 兼容 OpenAI /v1/audio/transcriptions 接口, 所以可以直接用.
+// OpenAICompat 是 multipart /audio/transcriptions 兼容协议的 ASR 实现。
+// 硅基流动和 Groq 等供应商可使用该实现。
 // 实现逻辑在 openai_compat.go.
 type OpenAICompat struct {
 	config Config       // 配置 (base_url, api_key, model), 构造时传入, 不可变
 	client *http.Client // HTTP 客户端, 复用它发请求 (底层复用 TCP 连接)
 }
 
+// Aliyun 是阿里云百炼 Qwen3-ASR-Flash 的同步 HTTP 实现。
+// 阿里接口虽然位于 OpenAI 兼容路径，但音频通过 chat/completions 的
+// input_audio 传递，和 multipart /audio/transcriptions 并不是同一种协议。
+type Aliyun struct {
+	config Config
+	client *http.Client
+}
+
 // MaxAudioBytes 是单次 ASR 请求的音频大小上限 (25MB).
 // Groq Whisper 限制文件大小 25MB, 超过需要分片.
 const MaxAudioBytes = 25 * 1024 * 1024
+
+// MaxAliyunAudioPayloadBytes 是阿里云 Qwen3-ASR-Flash 的 Data URL 上限。
+// Base64 会让数据膨胀，因此校验的是编码后的音频载荷，而不是原始 WAV 大小。
+const MaxAliyunAudioPayloadBytes = 10 * 1024 * 1024

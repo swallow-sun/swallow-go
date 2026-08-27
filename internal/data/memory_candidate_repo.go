@@ -120,6 +120,10 @@ func (r *sqliteRepo) ConfirmMemoryCandidate(ctx context.Context, id int64, userI
 	// 回调返回 nil 则提交, 返回 error 则回滚
 	var memory Memory
 	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		syncVersion, err := nextMemorySyncVersion(tx, userID)
+		if err != nil {
+			return err
+		}
 		// 1. 把候选状态改成 confirmed, 记录 resolved_at
 		now := time.Now()
 		result := tx.Model(&ormMemoryCandidate{}).
@@ -143,7 +147,7 @@ func (r *sqliteRepo) ConfirmMemoryCandidate(ctx context.Context, id int64, userI
 			Content:         candidate.Content,
 			MemoryType:      candidate.MemoryType,
 			Keywords:        "", // 候选确认时没有关键词, 后续编辑时再加
-			SyncVersion:     0,
+			SyncVersion:     syncVersion,
 			Status:          MemoryStatusActive,
 			CreatedAt:       now,
 			UpdatedAt:       now,

@@ -8,9 +8,18 @@ package handler
 
 import (
 	"github.com/swallow-sun/swallow-go/biz/service"
+	"github.com/swallow-sun/swallow-go/internal/config"
 	"github.com/swallow-sun/swallow-go/internal/provider/asr"
 	"github.com/swallow-sun/swallow-go/internal/provider/tts"
 )
+
+// truncStr 截断字符串到 maxLen 字符, 超出加 "...", 用于日志预览.
+func truncStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
 
 // 输入限制常量.
 // 在 handler 层入口校验, 防止超长输入撑爆数据库或消耗过多内存.
@@ -39,6 +48,8 @@ const (
 // handler 通过 Service 间接访问数据层, 跟 HTTP 解析和业务逻辑分开.
 // Deps 在程序启动时由 main.go 构造, 所有 handler 方法都挂在 *Deps 上.
 type Deps struct {
+	// config 保存服务端最终生效配置，用于向已认证设备下发非敏感运行参数。
+	config *config.Config
 	// chat 持有 *service.ChatService, 负责对话相关的业务逻辑
 	chat *service.ChatService
 	// session 持有 *service.SessionService, 负责用户登录和会话创建
@@ -51,6 +62,14 @@ type Deps struct {
 	memory *service.MemoryService
 	// device 持有 *service.DeviceService,负责设备注册、认证和身份归属查询.
 	device *service.DeviceService
+	// deviceSync 持有 *service.DeviceSyncService, 负责设备 sync_outbox 批量上报.
+	deviceSync *service.DeviceSyncService
+	// profile 持有 *service.ProfileService, 负责用户画像和对话标签查询.
+	profile *service.ProfileService
+	// emotion 持有 *service.EmotionService, 负责情绪持续段查询.
+	emotion *service.EmotionService
+	// reminder 持有 *service.ReminderService, 负责待办提醒管理.
+	reminder *service.ReminderService
 	// asr 持有 ASR Provider, 负责语音识别 (音频转文字).
 	// 可能为 nil (未配置 ASR 时), handler 里需判空.
 	asr asr.Provider
@@ -58,6 +77,9 @@ type Deps struct {
 	// 可能为 nil (未配置 TTS 时), handler 里需判空.
 	tts tts.Provider
 }
+
+// Reminder 返回 ReminderService 指针, 供 main.go 启动后台调度器使用.
+func (d *Deps) Reminder() *service.ReminderService { return d.reminder }
 
 // registerDeviceReq 是主人注册嵌入式设备的请求体.
 type registerDeviceReq struct {
@@ -121,9 +143,10 @@ type createSessionResp struct {
 // 客户端传 {"session_id": "xxx", "message": "你好"}, 解析到这个结构体里.
 // 除了 session_id 和 message, 还支持 client_message_id 用于幂等去重.
 type chatReq struct {
-	SessionID       string `json:"session_id"`        // 会话 ID, 告诉服务端这段消息属于哪段对话
-	ClientMessageID string `json:"client_message_id"` // 客户端生成的稳定消息 ID, 网络重试时必须保持不变
-	Message         string `json:"message"`           // 用户说的话
+	SessionID       string                 `json:"session_id"`        // 会话 ID, 告诉服务端这段消息属于哪段对话
+	ClientMessageID string                 `json:"client_message_id"` // 客户端生成的稳定消息 ID, 网络重试时必须保持不变
+	Message         string                 `json:"message"`           // 用户说的话
+	VoiceFeatures   *service.VoiceFeatures `json:"voice_features"`    // 声学特征 (可选), 辅助情绪判断
 }
 
 // historyItem 是一条对话记录, 对应数据库 dialogues 表里的一行.
@@ -146,16 +169,51 @@ type historyResp struct {
 // deviceASRResp 是 POST /api/v1/device/asr 的响应体.
 // 设备上传音频, Go 转发给 ASR 供应商, 返回识别出的文字.
 type deviceASRResp struct {
-	Text string `json:"text"` // 识别出的文字
+	Text     string  `json:"text"`               // 识别出的文字
+	Language string  `json:"language,omitempty"` // 供应商检测到的语言
+	Emotion  string  `json:"emotion,omitempty"`  // 供应商检测到的语音情绪
+	Duration float64 `json:"duration,omitempty"` // 供应商统计的音频秒数
 }
 
-// deviceTTSReq 是 POST /api/v1/device/tts 的请求体.
+// deviceTTSReq 是 POST /api/v1/device/tts 和 /api/v1/device/tts/stream 的请求体.
 // 设备发送要合成语音的文字, Go 转发给 TTS 供应商, 返回音频.
+// Tone 是可选的语气标签 (如 "warm", "cheerful").
+// 非流式 /device/tts: C++ 发完整含 tags 文本, Go 用 StripTagsAndTone 提取 tone.
+// 流式 /device/tts/stream: C++ 发干净句子 + tone 字段, Go 直接用 tone, 不再提取.
 type deviceTTSReq struct {
-	Text string `json:"text"` // 要合成语音的文字
+	Text         string  `json:"text"`                    // 要合成语音的文字
+	Tone         string  `json:"tone,omitempty"`          // 可选语气标签, 流式端点优先使用
+	SpeakingRate float64 `json:"speaking_rate,omitempty"` // 可选语速倍率, 0.8-1.2, 0 表示不传
+}
+
+// deviceRuntimeConfigResp 是设备启动时拉取的非敏感运行配置。
+// API Key、Token、供应商地址等服务端私有信息绝不能出现在响应中。
+type deviceRuntimeConfigResp struct {
+	TTSPlayback deviceTTSPlaybackConfigResp `json:"tts_playback"`
+}
+
+type deviceTTSPlaybackConfigResp struct {
+	Mode                  string `json:"mode"`
+	MaxSynthesisUnitBytes int    `json:"max_synthesis_unit_bytes"`
+	FinalPaddingMs        int    `json:"final_padding_ms"`
+	CrossfadeMs           int    `json:"crossfade_ms"`
+	StartPrebufferMs      int    `json:"start_prebuffer_ms"`
+	RecoveryPrebufferMs   int    `json:"recovery_prebuffer_ms"`
 }
 
 // deviceTTSResp 是 POST /api/v1/device/tts 的响应体.
 // 音频数据以 binary 返回, 不放 JSON 里, 这里只有元信息.
 // 实际响应 Content-Type 是 audio/mpeg, body 是 MP3 音频字节.
 
+// createReminderReq 是 POST /api/v1/reminders 的请求体.
+type createReminderReq struct {
+	Content  string `json:"content"`   // 提醒内容, 必填
+	RemindAt string `json:"remind_at"` // 提醒时间, RFC3339 格式, 必填
+}
+
+// updateReminderReq 是 PATCH /api/v1/reminders/:id 的请求体.
+type updateReminderReq struct {
+	Status   string `json:"status,omitempty"`    // 新状态: pending/delivered/acknowledged/cancelled
+	Content  string `json:"content,omitempty"`   // 新内容, 空串表示不改
+	RemindAt string `json:"remind_at,omitempty"` // 新提醒时间, RFC3339 格式, 空串表示不改
+}

@@ -78,9 +78,33 @@ func Register(r *server.Hertz, deps *handler.Deps) {
 		// 设备云端能力 API:设备令牌认证后创建会话并调用共用云端模型链路.
 		v1.POST("/device/session", deps.CreateDeviceSession)
 		v1.POST("/device/chat", deps.DeviceChat)
+		// 设备运行配置：只返回播放策略等非敏感字段，不包含任何 API Key。
+		v1.GET("/device/runtime-config", deps.DeviceRuntimeConfig)
 		// 设备语音 API:设备令牌认证后上传音频获取文字 (ASR) 或发送文字获取音频 (TTS).
 		v1.POST("/device/asr", deps.DeviceASR)
 		v1.POST("/device/tts", deps.DeviceTTS)
+		v1.POST("/device/tts/stream", deps.DeviceTTSStream)
+		// 设备同步 API:设备令牌认证后批量上报 sync_outbox 里的条目.
+		v1.POST("/device/sync", deps.DeviceSync)
+		v1.GET("/device/memories/sync", deps.DeviceMemorySync)
+
+		// 用户画像 API:查画像、查对话标签、查标签统计.
+		// 方案 16.12.6 节.
+		v1.GET("/profiles", deps.GetProfile)
+		v1.GET("/tags", deps.ListTags)
+		v1.GET("/tag-statistics", deps.ListTagStatistics)
+
+		// 情绪持续段 API:查情绪段列表、查最近一条情绪段.
+		v1.GET("/emotion-sessions", deps.ListEmotionSessions)
+		v1.GET("/emotion-sessions/latest", deps.GetLatestEmotionSession)
+
+		// 待办提醒 API:增删改查 + 确认 + 取消.
+		v1.POST("/reminders", deps.CreateReminder)
+		v1.GET("/reminders", deps.ListReminders)
+		v1.GET("/reminders/:id", deps.GetReminder)
+		v1.PATCH("/reminders/:id", deps.UpdateReminder)
+		v1.POST("/reminders/:id/ack", deps.AcknowledgeReminder)
+		v1.POST("/reminders/:id/cancel", deps.CancelReminder)
 	}
 }
 

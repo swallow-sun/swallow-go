@@ -46,6 +46,14 @@ const (
 	CodeUserNameTooLong = "user_name_too_long"
 	// CodeSensitiveMemory 表示记忆候选包含禁止保存的敏感信息.
 	CodeSensitiveMemory = "sensitive_memory_prohibited"
+	// CodeInvalidReminderID 表示提醒 ID 不合法.
+	CodeInvalidReminderID = "invalid_reminder_id"
+	// CodeInvalidAudio 表示 ASR 音频格式、内容或大小不合法。
+	CodeInvalidAudio = "invalid_audio"
+	// CodeASRRateLimited 表示选中的 ASR 供应商触发限流。
+	CodeASRRateLimited = "asr_rate_limited"
+	// CodeASRConfiguration 表示 ASR 供应商密钥或服务配置错误。
+	CodeASRConfiguration = "asr_configuration_error"
 )
 
 // Error 是 handler 返回给客户端的统一应用错误.

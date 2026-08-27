@@ -24,11 +24,15 @@ import (
 	"time"
 
 	"github.com/swallow-sun/swallow-go/internal/agent"
+	"github.com/swallow-sun/swallow-go/internal/companion"
 	"github.com/swallow-sun/swallow-go/internal/config"
 	"github.com/swallow-sun/swallow-go/internal/data"
+	"github.com/swallow-sun/swallow-go/internal/emotion"
 	"github.com/swallow-sun/swallow-go/internal/identity"
 	"github.com/swallow-sun/swallow-go/internal/memory"
+	"github.com/swallow-sun/swallow-go/internal/profile"
 	"github.com/swallow-sun/swallow-go/internal/provider/llm"
+	"github.com/swallow-sun/swallow-go/internal/reminder"
 	"github.com/swallow-sun/swallow-go/internal/telemetry"
 	"github.com/swallow-sun/swallow-go/internal/trace"
 	"github.com/swallow-sun/swallow-go/pkg/logger"
@@ -52,6 +56,25 @@ func FromChatError(err error) *ChatError {
 	return nil
 }
 
+// VoiceFeatures 是 C++ 客户端从录音 PCM 中提取的声学特征.
+// 辅助 LLM 判断用户情绪, 全部可选 (textio/stub 模式不会发送).
+// 定义在 service 包而非 handler 包, 避免 handler→service 循环依赖.
+type VoiceFeatures struct {
+	Energy       *float64 `json:"energy"`        // RMS 能量 [0,1], 反映音量. 高=激动/生气, 低=平静/低落
+	DurationMs   *int     `json:"duration_ms"`   // 有效语音时长 (毫秒), 去掉前后静音
+	SpeakingRate *float64 `json:"speaking_rate"` // 语速 (音节/秒). 快=急切/兴奋, 慢=疲惫/沉重
+	PitchMean    *float64 `json:"pitch_mean"`    // 基频均值 (Hz). 高=紧张/惊讶, 低=沉稳/悲伤
+	ASREmotion   *string  `json:"asr_emotion"`   // 云 ASR 的情绪初判，只作为参考信号
+	ASRLanguage  *string  `json:"asr_language"`  // 云 ASR 检测到的语种
+}
+
+// HasData 判断是否包含有效声学特征.
+func (v *VoiceFeatures) HasData() bool {
+	return v != nil && ((v.DurationMs != nil && *v.DurationMs > 0) ||
+		(v.ASREmotion != nil && strings.TrimSpace(*v.ASREmotion) != "") ||
+		(v.ASRLanguage != nil && strings.TrimSpace(*v.ASRLanguage) != ""))
+}
+
 // NewDeps 组装 service 层共享依赖，所有服务共用同一份实例。
 // 启动时查出 owner 用户 ID 并缓存, 用于 chat/history 接口的用户隔离.
 func NewDeps(cfg *config.Config, repo data.Repository, idm *identity.Manager, mem *memory.Store, provider llm.Provider) *Deps {
@@ -63,7 +86,27 @@ func NewDeps(cfg *config.Config, repo data.Repository, idm *identity.Manager, me
 		// 这里不 panic, 而是返回一个零值 ownerID, 后续请求会返回 403.
 		logger.Error("failed to init owner user for service deps", zap.Error(err))
 	}
-	return &Deps{cfg: cfg, repo: repo, idm: idm, mem: mem, llm: provider, ownerID: owner.ID}
+
+	// 创建阶段 4.5 扩展依赖
+	emotionStore := emotion.New(repo)
+	profileStore := profile.New(repo)
+	reminderStore := reminder.New(repo)
+	profileSvc := profile.NewService(profileStore, provider, cfg.LLM.Model, cfg.Profile)
+	companionSvc := companion.New(repo)
+
+	return &Deps{
+		cfg:           cfg,
+		repo:          repo,
+		idm:           idm,
+		mem:           mem,
+		llm:           provider,
+		ownerID:       owner.ID,
+		emotionStore:  emotionStore,
+		profileStore:  profileStore,
+		profileSvc:    profileSvc,
+		reminderStore: reminderStore,
+		companionSvc:  companionSvc,
+	}
 }
 
 // OwnerID 返回启动时缓存的 owner 用户 ID.
@@ -85,12 +128,14 @@ func NewChatService(deps *Deps) *ChatService {
 //   - error: 不是 nil 说明请求还没开始就失败了(幂等冲突, Agent 创建失败等), handler 直接返回 HTTP 错误.
 //
 // ctx 由 handler 传进来, service 用它检测客户端有没有断开.
+// voiceFeatures 是 C++ 客户端提取的声学特征 (可选), 辅助 LLM 情绪判断.
 // deviceIDs 是可选的设备归因参数:不传表示主人请求;设备请求传一个认证后的设备 UUID.
 // 使用可变参数是为了兼容原有调用点,业务上只读取第一个值,不能传入未经认证的请求字段.
 func (s *ChatService) Chat(
 	ctx context.Context,
 	sessionID, clientMessageID, message string,
 	userID int64,
+	voiceFeatures *VoiceFeatures,
 	deviceIDs ...string,
 ) (<-chan ChatEvent, error) {
 	deviceID := ""
@@ -175,6 +220,32 @@ func (s *ChatService) Chat(
 		s.failChatRequest(chatRequest.ID, traceID, ChatErrorAgentInit)
 		cancel()
 		return nil, NewChatError(500, ChatErrorAgentInit, traceID)
+	}
+
+	// 注入阶段 4.5 扩展依赖 (画像/情绪/提醒)
+	ag.SetExtras(&agent.Extras{
+		CompanionService:   s.deps.companionSvc,
+		EmotionStore:       s.deps.emotionStore,
+		ProfileStore:       s.deps.profileStore,
+		ProfileService:     s.deps.profileSvc,
+		ReminderStore:      s.deps.reminderStore,
+		EmotionMaxSessions: s.deps.cfg.Emotion.MaxHistorySessions,
+		ReminderMaxInject:  s.deps.cfg.Reminder.MaxInjectReminders,
+	})
+
+	// 注入声学特征 (可选), 辅助 LLM 情绪判断
+	// service.VoiceFeatures → agent.VoiceFeatures 类型转换 (两包各自定义同名结构体, 避免循环依赖)
+	if voiceFeatures != nil && voiceFeatures.HasData() {
+		ag.SetVoiceFeatures(&agent.VoiceFeatures{
+			Energy:       voiceFeatures.Energy,
+			DurationMs:   voiceFeatures.DurationMs,
+			SpeakingRate: voiceFeatures.SpeakingRate,
+			PitchMean:    voiceFeatures.PitchMean,
+			ASREmotion:   voiceFeatures.ASREmotion,
+			ASRLanguage:  voiceFeatures.ASRLanguage,
+		})
+	} else {
+		ag.SetVoiceFeatures(nil)
 	}
 
 	// 调 Agent 的流式对话方法, 拿到一个 streamReader(流式读取器).

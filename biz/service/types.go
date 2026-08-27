@@ -12,12 +12,16 @@
 package service
 
 import (
+	"github.com/swallow-sun/swallow-go/internal/companion"
 	"github.com/swallow-sun/swallow-go/internal/config"
 	"github.com/swallow-sun/swallow-go/internal/data"
 	"github.com/swallow-sun/swallow-go/internal/device"
+	"github.com/swallow-sun/swallow-go/internal/emotion"
 	"github.com/swallow-sun/swallow-go/internal/identity"
 	"github.com/swallow-sun/swallow-go/internal/memory"
+	"github.com/swallow-sun/swallow-go/internal/profile"
 	"github.com/swallow-sun/swallow-go/internal/provider/llm"
+	"github.com/swallow-sun/swallow-go/internal/reminder"
 )
 
 // 以下常量是 chat 接口在鉴权/幂等校验失败时返回给客户端的稳定错误码.
@@ -94,9 +98,77 @@ type HistoryService struct {
 
 // MemoryService 编排长期记忆领域组件。
 type MemoryService struct {
+	repo       data.Repository          // 设备增量同步需要直接读取版本变更
 	candidate  *memory.CandidateService // 候选生命周期管理
 	retriever  *memory.Retriever        // 正式记忆检索
 	memService *memory.Service          // 正式记忆增删改查
+}
+
+// ProfileService 编排用户画像和对话标签的查询.
+type ProfileService struct {
+	store *profile.Store  // 画像数据存储
+	repo  data.Repository // 直接访问 repo, 用于查 dialogue_tags 等不走 store 的方法
+}
+
+// EmotionService 编排情绪持续段的查询.
+type EmotionService struct {
+	store *emotion.Store // 情绪数据存储
+}
+
+// ReminderService 编排待办提醒的增删改查.
+type ReminderService struct {
+	store *reminder.Store // 提醒数据存储
+	repo  data.Repository // 直接访问 repo, 用于 UpdateReminder 的任意字段更新
+}
+
+// ProfileResult 是用户画像查询结果.
+type ProfileResult struct {
+	ProfileJSON    string `json:"profile_json"`    // 画像 JSON 字符串
+	AnalyzedRounds int    `json:"analyzed_rounds"` // 已分析轮数
+	AnalysisCount  int    `json:"analysis_count"`  // 分析次数
+}
+
+// ListTagsResult 是对话标签列表查询结果.
+type ListTagsResult struct {
+	Items []data.DialogueTag `json:"items"` // 标签列表
+}
+
+// ListTagStatisticsResult 是标签统计列表查询结果.
+type ListTagStatisticsResult struct {
+	Items []data.TagStatistic `json:"items"` // 统计列表
+}
+
+// ListEmotionSessionsResult 是情绪持续段列表查询结果.
+type ListEmotionSessionsResult struct {
+	Items []data.EmotionSession `json:"items"` // 情绪段列表
+}
+
+// ListRemindersResult 是提醒列表查询结果.
+type ListRemindersResult struct {
+	Items []data.Reminder `json:"items"` // 提醒列表
+}
+
+// CreateReminderResult 是创建提醒的结果.
+type CreateReminderResult struct {
+	Reminder data.Reminder `json:"reminder"` // 创建的提醒记录
+}
+
+// ReminderResult 是单条提醒查询结果.
+type ReminderResult struct {
+	Reminder data.Reminder `json:"reminder"` // 提醒记录
+}
+
+// CreateReminderReq 是创建提醒的请求参数.
+type CreateReminderReq struct {
+	Content  string `json:"content"`   // 提醒内容
+	RemindAt string `json:"remind_at"` // 提醒时间, RFC3339 格式
+}
+
+// UpdateReminderReq 是更新提醒的请求参数.
+type UpdateReminderReq struct {
+	Status   string `json:"status,omitempty"`    // 新状态: pending/delivered/acknowledged/cancelled
+	Content  string `json:"content,omitempty"`   // 新内容
+	RemindAt string `json:"remind_at,omitempty"` // 新提醒时间, RFC3339 格式
 }
 
 // DeviceService 编排设备注册和设备身份认证.
@@ -127,6 +199,13 @@ type ListMemoriesResult struct {
 }
 type UpdateMemoryResult struct {
 	Memory data.Memory `json:"memory"` /* 更新后的正式记忆 */
+}
+
+type MemorySyncResult struct {
+	Memories    []data.Memory          `json:"memories"`
+	Tombstones  []data.MemoryTombstone `json:"tombstones"`
+	NextVersion int                    `json:"next_version"`
+	HasMore     bool                   `json:"has_more"`
 }
 
 // ChatError 是 service 层返回给 handler 的业务错误.
@@ -206,7 +285,7 @@ type HistoryResult struct {
 	Items     []HistoryItem // 对话记录列表, 按时间正序排列
 }
 
-// Deps 是六个 Service 共用的底层依赖集合.
+// Deps 是各 Service 共用的底层依赖集合.
 // service 层不自己创建 repo/idm/mem/llm, 而是由 handler 层的 NewDeps 组装好后传进来.
 // 字段是小写(包外不可见), 外部通过 NewDeps 构造函数创建.
 // 小写字段意味着 biz/service 包外面不能直接改这些字段, 保证依赖组装只在 NewDeps 里做
@@ -217,4 +296,11 @@ type Deps struct {
 	mem     *memory.Store
 	llm     llm.Provider
 	ownerID int64 // owner 用户 ID, 启动时查出并缓存, 用于 chat/history 接口的用户隔离
+
+	// 阶段 4.5 扩展依赖
+	emotionStore  *emotion.Store     // 情绪持续段和情绪标签存取
+	profileStore  *profile.Store     // 对话标签和画像存取
+	profileSvc    *profile.Service   // 画像分析后台服务
+	reminderStore *reminder.Store    // 待办提醒存取
+	companionSvc  *companion.Service // 关系人格和情感行为策略
 }

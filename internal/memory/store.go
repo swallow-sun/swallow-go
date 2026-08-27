@@ -193,17 +193,14 @@ func (s *Store) LoadHistory(
 }
 
 // SearchLongTerm 检索用户已经确认的正式长期记忆。
-// 第一轮使用用户原问题检索；没有精确结果时回退到最近更新的 active 记忆。
+// 使用用户原问题做词元检索；无匹配时返回空集合，不注入无关记忆。
 func (s *Store) SearchLongTerm(ctx context.Context, userID int64, query string, limit int) (SearchResult, error) {
 	retriever := NewRetriever(s.repo)
 	result, err := retriever.Search(ctx, userID, query, limit)
 	if err != nil {
 		return SearchResult{}, err
 	}
-	if result.Returned > 0 || query == "" {
-		return result, nil
-	}
-	return retriever.Search(ctx, userID, "", limit)
+	return result, nil
 }
 
 // CreateCandidates 在完整一轮对话成功保存后生成 pending 长期记忆候选。

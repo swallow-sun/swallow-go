@@ -55,12 +55,53 @@ func Load() (*Config, error) {
 	cfg.applyLogDefaults()
 	// 旧配置没有 [memory] 时默认开启敏感信息过滤,防止升级后意外关闭安全边界.
 	cfg.applyMemoryDefaults()
+	// 阶段 4.5: 旧配置没有 [profile]/[emotion]/[reminder] 时补默认值.
+	cfg.applyProfileDefaults()
+	cfg.applyEmotionDefaults()
+	cfg.applyReminderDefaults()
+	cfg.applyTTSPlaybackDefaults()
 	// 加载完后校验启动配置(环境,端口,数据库路径等),不合法就报错
 	if err := cfg.ValidateBootstrap(); err != nil {
 		return nil, err
 	}
 	// 返回配置指针,调用方拿着这个 cfg 就能拿到所有配置值
 	return &cfg, nil
+}
+
+const (
+	DefaultTTSPlaybackMode        = "full_turn"
+	DefaultTTSMaxSynthesisBytes   = 4096
+	DefaultTTSFinalPaddingMs      = 200
+	DefaultTTSCrossfadeMs         = 16
+	DefaultTTSStartPrebufferMs    = 600
+	DefaultTTSRecoveryPrebufferMs = 1200
+	MaxTTSPlaybackDurationMs      = 2000
+	MaxTTSSynthesisUnitBytesLimit = 64 * 1024
+)
+
+// applyTTSPlaybackDefaults 补齐需要下发给设备端的播放参数。
+func (cfg *Config) applyTTSPlaybackDefaults() {
+	// 统一转成小写再下发，避免配置中误写 FULL_TURN 后 Go 校验通过、
+	// C++ 却因为大小写不一致回退到默认值。
+	cfg.TTS.PlaybackMode = strings.ToLower(strings.TrimSpace(cfg.TTS.PlaybackMode))
+	if cfg.TTS.PlaybackMode == "" {
+		cfg.TTS.PlaybackMode = DefaultTTSPlaybackMode
+	}
+	if cfg.TTS.MaxSynthesisUnitBytes == 0 {
+		cfg.TTS.MaxSynthesisUnitBytes = DefaultTTSMaxSynthesisBytes
+	}
+	if cfg.TTS.FinalPaddingMs == 0 {
+		cfg.TTS.FinalPaddingMs = DefaultTTSFinalPaddingMs
+	}
+	if cfg.TTS.CrossfadeMs == 0 {
+		cfg.TTS.CrossfadeMs = DefaultTTSCrossfadeMs
+	}
+	if cfg.TTS.StartPrebufferMs == 0 {
+		cfg.TTS.StartPrebufferMs = DefaultTTSStartPrebufferMs
+	}
+	if cfg.TTS.RecoveryPrebufferMs == 0 {
+		cfg.TTS.RecoveryPrebufferMs = DefaultTTSRecoveryPrebufferMs
+	}
 }
 
 // applyMemoryDefaults 补齐长期记忆安全配置.
@@ -79,6 +120,79 @@ func (cfg Config) MemorySafetyFilterEnabled() bool {
 		return DefaultMemorySafetyFilterEnabled
 	}
 	return *cfg.Memory.SafetyFilterEnabled
+}
+
+// SelectedASRProviderConfig 返回当前 provider 对应的独立配置。
+//
+// 兼容说明：旧版硅基流动配置使用 [asr] 下的平铺字段。只要独立配置里还没有
+// api_key，就继续读取这组旧字段；阿里云永远不会回退读取旧字段，防止把硅基流动
+// 密钥发送给阿里云。该兼容只发生在配置解析阶段，不是请求失败后的运行时降级。
+func (cfg ASRConfig) SelectedASRProviderConfig() ASRProviderConfig {
+	switch strings.ToLower(strings.TrimSpace(cfg.Provider)) {
+	case "aliyun":
+		return cfg.Aliyun
+	case "siliconflow":
+		if strings.TrimSpace(cfg.SiliconFlow.APIKey) != "" {
+			return cfg.SiliconFlow
+		}
+		return ASRProviderConfig{
+			BaseURL:   cfg.BaseURL,
+			APIKey:    cfg.APIKey,
+			Model:     cfg.Model,
+			Language:  cfg.Language,
+			EnableITN: cfg.EnableITN,
+		}
+	default:
+		// Groq 和自定义 OpenAI 兼容服务继续使用旧版平铺字段。
+		return ASRProviderConfig{
+			BaseURL:   cfg.BaseURL,
+			APIKey:    cfg.APIKey,
+			Model:     cfg.Model,
+			Language:  cfg.Language,
+			EnableITN: cfg.EnableITN,
+		}
+	}
+}
+
+// SelectedTTSProviderConfig 返回当前远程 TTS provider 的连接配置。
+// 阿里云使用独立的 [tts.aliyun]，绝不回退读取硅基流动平铺密钥；其他旧 provider
+// 继续读取 [tts] 平铺字段，保证现有配置无需迁移即可运行。
+func (cfg TTSConfig) SelectedTTSProviderConfig() TTSProviderConfig {
+	if strings.EqualFold(strings.TrimSpace(cfg.Provider), "aliyun") {
+		return cfg.Aliyun
+	}
+	return TTSProviderConfig{
+		BaseURL:    cfg.BaseURL,
+		APIKey:     cfg.APIKey,
+		Model:      cfg.Model,
+		Voice:      cfg.Voice,
+		SampleRate: cfg.SampleRate,
+		Speed:      cfg.Speed,
+	}
+}
+
+// applyProfileDefaults 补齐用户画像分析配置的默认值.
+func (cfg *Config) applyProfileDefaults() {
+	if cfg.Profile.AnalysisThreshold <= 0 {
+		cfg.Profile.AnalysisThreshold = DefaultProfileAnalysisThreshold
+	}
+}
+
+// applyEmotionDefaults 补齐情绪感知配置的默认值.
+func (cfg *Config) applyEmotionDefaults() {
+	if cfg.Emotion.MaxHistorySessions <= 0 {
+		cfg.Emotion.MaxHistorySessions = DefaultEmotionMaxHistorySessions
+	}
+}
+
+// applyReminderDefaults 补齐待办提醒配置的默认值.
+func (cfg *Config) applyReminderDefaults() {
+	if cfg.Reminder.ScanIntervalSeconds <= 0 {
+		cfg.Reminder.ScanIntervalSeconds = DefaultReminderScanIntervalSeconds
+	}
+	if cfg.Reminder.MaxInjectReminders <= 0 {
+		cfg.Reminder.MaxInjectReminders = DefaultReminderMaxInjectReminders
+	}
 }
 
 // applyLogDefaults 根据运行环境补齐未显式配置的日志等级和目录。
@@ -187,6 +301,48 @@ func (cfg Config) ValidateRuntime() error {
 	// 模型名不能为空,空了就不知道调哪个模型
 	if strings.TrimSpace(cfg.LLM.Model) == "" {
 		return fmt.Errorf("llm.model must not be empty")
+	}
+	playbackMode := strings.ToLower(strings.TrimSpace(cfg.TTS.PlaybackMode))
+	if playbackMode == "" {
+		playbackMode = DefaultTTSPlaybackMode
+	}
+	maxSynthesisBytes := cfg.TTS.MaxSynthesisUnitBytes
+	if maxSynthesisBytes == 0 {
+		maxSynthesisBytes = DefaultTTSMaxSynthesisBytes
+	}
+	finalPaddingMs := cfg.TTS.FinalPaddingMs
+	if finalPaddingMs == 0 {
+		finalPaddingMs = DefaultTTSFinalPaddingMs
+	}
+	crossfadeMs := cfg.TTS.CrossfadeMs
+	if crossfadeMs == 0 {
+		crossfadeMs = DefaultTTSCrossfadeMs
+	}
+	startPrebufferMs := cfg.TTS.StartPrebufferMs
+	if startPrebufferMs == 0 {
+		startPrebufferMs = DefaultTTSStartPrebufferMs
+	}
+	recoveryPrebufferMs := cfg.TTS.RecoveryPrebufferMs
+	if recoveryPrebufferMs == 0 {
+		recoveryPrebufferMs = DefaultTTSRecoveryPrebufferMs
+	}
+	if playbackMode != "full_turn" && playbackMode != "low_latency" {
+		return fmt.Errorf("tts.playback_mode must be full_turn or low_latency")
+	}
+	if maxSynthesisBytes < 256 || maxSynthesisBytes > MaxTTSSynthesisUnitBytesLimit {
+		return fmt.Errorf("tts.max_synthesis_unit_bytes must be between 256 and %d", MaxTTSSynthesisUnitBytesLimit)
+	}
+	if finalPaddingMs < 0 || finalPaddingMs > MaxTTSPlaybackDurationMs {
+		return fmt.Errorf("tts.final_padding_ms must be between 0 and %d", MaxTTSPlaybackDurationMs)
+	}
+	if crossfadeMs < 0 || crossfadeMs > 100 {
+		return fmt.Errorf("tts.crossfade_ms must be between 0 and 100")
+	}
+	if startPrebufferMs < 120 || startPrebufferMs > 3000 {
+		return fmt.Errorf("tts.start_prebuffer_ms must be between 120 and 3000")
+	}
+	if recoveryPrebufferMs < 120 || recoveryPrebufferMs > 3000 {
+		return fmt.Errorf("tts.recovery_prebuffer_ms must be between 120 and 3000")
 	}
 	return nil
 }

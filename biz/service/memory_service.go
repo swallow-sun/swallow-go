@@ -49,10 +49,20 @@ func NewMemoryService(deps *Deps) *MemoryService {
 	}
 
 	return &MemoryService{
+		repo:       deps.repo,
 		candidate:  candidate,
 		retriever:  retriever,
 		memService: memService,
 	}
+}
+
+// SyncChanges 返回设备从 sinceVersion 之后需要应用的增量记忆。
+func (s *MemoryService) SyncChanges(ctx context.Context, userID int64, sinceVersion, limit int) (MemorySyncResult, error) {
+	changes, err := s.repo.GetMemorySyncChanges(ctx, userID, sinceVersion, limit)
+	if err != nil {
+		return MemorySyncResult{}, fmt.Errorf("sync memory changes: %w", err)
+	}
+	return MemorySyncResult{Memories: changes.Memories, Tombstones: changes.Tombstones, NextVersion: changes.NextVersion, HasMore: changes.HasMore}, nil
 }
 
 // CreateCandidate 手动提交一条记忆候选.

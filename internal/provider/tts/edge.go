@@ -25,6 +25,8 @@ import (
 	// time 超时控制
 	"time"
 
+	// net/http 提供 http.Header, 用于设置 WebSocket 握手时的 HTTP 头
+	"net/http"
 	// gorilla/websocket 是 Go 生态最常用的 WebSocket 库
 	"github.com/gorilla/websocket"
 )
@@ -64,8 +66,13 @@ func (p *EdgeTTS) Synthesize(ctx context.Context, req SynthesizeRequest) (Synthe
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 30 * time.Second,
 	}
-	// 连接微软 edge-tts 端点, 带 Origin 头模拟浏览器 (微软要求 Origin)
-	conn, _, err := dialer.DialContext(ctx, EdgeTTSWsURL, nil)
+	// 连接微软 edge-tts 端点.
+	// edge-tts 端点要求带 Origin 和 User-Agent 头, 否则返回 403 (bad handshake).
+	// Origin 模拟浏览器来源, User-Agent 模拟 Edge 浏览器.
+	headers := http.Header{}
+	headers.Set("Origin", "chrome-extension://jdiccldinpjfifafobkncjillplhdcndl")
+	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0")
+	conn, _, err := dialer.DialContext(ctx, EdgeTTSWsURL, headers)
 	if err != nil {
 		return SynthesizeResponse{}, fmt.Errorf("websocket dial: %w", err)
 	}

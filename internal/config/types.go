@@ -31,6 +31,14 @@ const (
 	DefaultLogCompress = true
 	// DefaultMemorySafetyFilterEnabled 表示长期记忆敏感信息过滤默认开启.
 	DefaultMemorySafetyFilterEnabled = true
+	// DefaultProfileAnalysisThreshold 是触发画像分析的默认对话轮数.
+	DefaultProfileAnalysisThreshold = 30
+	// DefaultEmotionMaxHistorySessions 是注入 system prompt 的情绪段默认最大条数.
+	DefaultEmotionMaxHistorySessions = 5
+	// DefaultReminderScanIntervalSeconds 是后台扫描到期提醒的默认间隔 (秒).
+	DefaultReminderScanIntervalSeconds = 60
+	// DefaultReminderMaxInjectReminders 是注入 system prompt 的默认最大提醒条数.
+	DefaultReminderMaxInjectReminders = 5
 )
 
 // Config 是整个项目的配置根结构.
@@ -59,6 +67,12 @@ type Config struct {
 	ASR ASRConfig `toml:"asr"`
 	// TTS 对应 [tts] 段, 放语音合成 (TTS) 配置.
 	TTS TTSConfig `toml:"tts"`
+	// Profile 对应 [profile] 段, 放用户画像分析配置.
+	Profile ProfileConfig `toml:"profile"`
+	// Emotion 对应 [emotion] 段, 放情绪感知配置.
+	Emotion EmotionConfig `toml:"emotion"`
+	// Reminder 对应 [reminder] 段, 放待办提醒配置.
+	Reminder ReminderConfig `toml:"reminder"`
 	// LoadedSources 记录实际加载了哪些配置文件,方便排查"配置从哪来的"
 	// toml:"-" 的意思是:这个字段不参与 TOML 解析,不是从配置文件里读的,
 	// 而是代码在加载文件时自己往里 append 的
@@ -93,6 +107,10 @@ type ServerConfig struct {
 	// Port 是 HTTP 监听端口号,合法范围 1-65535
 	// 比如 config.toml 里写 server.port = 8080,这里就拿到 8080
 	Port int `toml:"port"` // HTTP 监听端口,1-65535
+
+	// GrpcPort 是 gRPC 监听端口号, 用于 TTS 流式合成.
+	// 0 表示使用默认值 9881. gRPC 和 HTTP 并行运行, 互不干扰.
+	GrpcPort int `toml:"grpc_port"` // gRPC 监听端口, 默认 9881
 }
 
 // LLMConfig 放 LLM 服务连接配置.
@@ -147,31 +165,160 @@ type DebugConfig struct {
 	PProfPort int `toml:"pprof_port"` // pprof HTTP 端口,0=不启动
 }
 
-// ASRConfig 放语音识别 (ASR) 服务连接配置.
-// 当前用 Groq Whisper, 兼容 OpenAI /v1/audio/transcriptions 接口.
+// ASRConfig 放语音识别 (ASR) 服务连接配置。
+// Provider 决定唯一实现，不会在供应商之间自动降级。
 type ASRConfig struct {
-	// Provider 是 ASR 供应商名称, 如 "groq"
+	// Provider 是 ASR 供应商名称：aliyun、siliconflow、groq、
+	// openai_compatible 或 disabled。
 	Provider string `toml:"provider"` // ASR 供应商名称
-	// BaseURL 是 ASR 服务的 API 基础地址, 如 "https://api.groq.com/openai/v1"
-	// 后面的 /audio/transcriptions 路径由 provider 层自己拼
+	// BaseURL 是 ASR 服务的 API 基础地址。
+	// 不同 Provider 会自行追加 chat/completions 或 audio/transcriptions。
 	BaseURL string `toml:"base_url"` // ASR 服务的 API 基础地址
 	// APIKey 是调 ASR 用的密钥
 	APIKey string `toml:"api_key"` // ASR API 密钥
-	// Model 是 ASR 模型名, 如 "whisper-large-v3"
+	// Model 是 ASR 模型名，如 qwen3-asr-flash。
 	Model string `toml:"model"` // ASR 模型名
+	// Language 是旧版平铺配置的语种提示；auto 表示自动检测。
+	Language string `toml:"language"`
+	// EnableITN 控制数字、日期等口语结果的书面化规整。
+	// 目前仅阿里云 Qwen-ASR 使用，其他 Provider 会忽略。
+	EnableITN bool `toml:"enable_itn"`
+	// Aliyun 保存阿里云独立连接配置，切换供应商时不会误用其他家的密钥。
+	Aliyun ASRProviderConfig `toml:"aliyun"`
+	// SiliconFlow 保存硅基流动独立连接配置。
+	SiliconFlow ASRProviderConfig `toml:"siliconflow"`
+}
+
+// ASRProviderConfig 是单个云 ASR 供应商的独立配置。
+// 各供应商分别保存地址、密钥和模型，provider 只负责选择，不复制配置。
+type ASRProviderConfig struct {
+	BaseURL   string `toml:"base_url"`
+	APIKey    string `toml:"api_key"`
+	Model     string `toml:"model"`
+	Language  string `toml:"language"`   // auto 表示让模型自动检测
+	EnableITN bool   `toml:"enable_itn"` // 数字、日期等口语结果书面化
 }
 
 // TTSConfig 放语音合成 (TTS) 服务配置.
-// 当前用 edge-tts, 微软免费 TTS, 不需要 API key.
+// 支持五种 provider:
+//   - cosyvoice: 本地 CosyVoice2 (tts_server.py), GPU 推理, 支持流式, 低延迟
+//   - siliconflow: 硅基流动 TTS, HTTP POST, 支持 API 级流式, 需要 api_key (国内直连)
+//   - edge: 微软 edge-tts, 走 WebSocket, 不需要 api_key (国内不稳定, 不支持流式)
+//   - zhipu: 智谱 GLM-TTS, 支持官方音色和 GLM-TTS-Clone 私有音色
+//   - aliyun: 阿里云百炼 CosyVoice WebSocket, 双向流式、低首包延迟
 type TTSConfig struct {
-	// Voice 是默认语音名称, 如 "zh-CN-XiaoxiaoNeural" (女声晓晓)
+	// Provider 是 TTS 供应商名称: cosyvoice、siliconflow、aliyun、zhipu 或 edge。
+	Provider string `toml:"provider"` // TTS 供应商名称
+	// Aliyun 是阿里云百炼实时 TTS 的独立配置，不与硅基流动密钥混用。
+	Aliyun TTSProviderConfig `toml:"aliyun"`
+	// BaseURL 是 TTS 服务的 API 基础地址 (siliconflow 用, edge 不需要)
+	// 如 "https://api.siliconflow.cn/v1"
+	BaseURL string `toml:"base_url"` // TTS 服务的 API 基础地址
+	// APIKey 是调 TTS 用的密钥 (siliconflow 用, edge 不需要)
+	// 只从 TOML 读, 不 seed 到数据库 (和 ASR 一样)
+	APIKey string `toml:"api_key"` // TTS API 密钥
+	// Model 是 TTS 模型名 (siliconflow 用, edge 不需要)
+	// 如 "FunAudioLLM/CosyVoice2-0.5B"
+	Model string `toml:"model"` // TTS 模型名
+	// Voice 是默认语音名称
+	// edge: "zh-CN-XiaoxiaoNeural" (女声晓晓)
+	// siliconflow: "FunAudioLLM/CosyVoice2-0.5B:alex" (男声 Alex)
 	Voice string `toml:"voice"` // 默认语音名称
-	// OutputFormat 是音频输出格式, 如 "audio-48khz-192kbitrate-mono-mp3"
+	// ReferenceAudio 是声音克隆参考音频的本地路径 (siliconflow CosyVoice2 用).
+	// 配置后 TTS 会读这个文件转 base64, 通过 references 字段发给 API 克隆音色.
+	// 配了此字段后 voice 字段不发送 (两者互斥). 不配则用 voice 预设音色.
+	// 支持 .wav/.mp3 格式, 建议 3-10 秒清晰人声.
+	ReferenceAudio string `toml:"reference_audio"` // 声音克隆参考音频路径
+	// ReferenceText 是参考音频的转录文本 (siliconflow CosyVoice2 用).
+	// SiliconFlow API 实测必填, 不传会返回 500 错误.
+	ReferenceText string `toml:"reference_text"` // 参考音频转录文本
+	// OutputFormat 是音频输出格式
+	// edge: "riff-16khz-16bit-mono-pcm" (裸 PCM, Go 侧拼 WAV 头)
+	// siliconflow: "wav" (直接输出完整 WAV 文件)
 	OutputFormat string `toml:"output_format"` // 音频输出格式
-	// Rate 是语速, 如 "+0%", "-10%", "+20%"
-	Rate string `toml:"rate"` // 语速
-	// Volume 是音量, 如 "+0%", "-50%"
-	Volume string `toml:"volume"` // 音量
-	// Pitch 是音调, 如 "+0Hz", "-50Hz"
-	Pitch string `toml:"pitch"` // 音调
+	// SampleRate 是输出采样率 (siliconflow 用, edge 不支持)
+	// 如 16000 (和 C++ waveOut 匹配)
+	SampleRate int `toml:"sample_rate"` // 输出采样率
+	// Speed 是语速 (siliconflow 用), 0.25~4.0, 默认 1.0
+	Speed float64 `toml:"speed"` // 语速
+	// PlaybackMode 控制设备端如何组织一轮文字：full_turn 收齐后一次合成，
+	// low_latency 按较小文本单元尽早起播。配置通过设备运行配置接口下发。
+	PlaybackMode string `toml:"playback_mode"`
+	// MaxSynthesisUnitBytes 是单次 TTS 请求的最大 UTF-8 字节数。
+	MaxSynthesisUnitBytes int `toml:"max_synthesis_unit_bytes"`
+	// FinalPaddingMs 是设备端在整轮原始 PCM 后追加的零静音时长。
+	FinalPaddingMs int `toml:"final_padding_ms"`
+	// CrossfadeMs 是极长回复包含多个合成单元时的交叉淡化时长。
+	CrossfadeMs int `toml:"crossfade_ms"`
+	// StartPrebufferMs 是首次开口前至少积累的可播放音频时长。
+	// 太大会显得反应迟钝，太小则容易被上游到包抖动耗尽。
+	StartPrebufferMs int `toml:"start_prebuffer_ms"`
+	// RecoveryPrebufferMs 是发生真实欠载后恢复播放前重新积累的音频时长。
+	RecoveryPrebufferMs int `toml:"recovery_prebuffer_ms"`
+	// Rate 是语速 (edge 用), 如 "+0%", "-10%", "+20%"
+	Rate string `toml:"rate"` // 语速 (edge-tts)
+	// Volume 是音量 (edge 用), 如 "+0%", "-50%"
+	Volume string `toml:"volume"` // 音量 (edge-tts)
+	// Pitch 是音调 (edge 用), 如 "+0Hz", "-50Hz"
+	Pitch string `toml:"pitch"` // 音调 (edge-tts)
+
+	// CosyVoiceBaseURL 是本地 CosyVoice2 TTS 服务 (tts_server.py) 的地址.
+	// provider = "cosyvoice" 时使用, 如 "http://127.0.0.1:9880".
+	// tts_server.py 需单独启动 (GPU 推理服务), Go 通过 HTTP 调用它.
+	CosyVoiceBaseURL string `toml:"cosyvoice_base_url"` // 本地 CosyVoice2 TTS 服务地址
+
+	// CosyVoiceModelDir 是 CosyVoice2 模型目录路径.
+	// 如 "models/cosyvoice2" 或绝对路径.
+	CosyVoiceModelDir string `toml:"cosyvoice_model_dir"` // CosyVoice2 模型目录
+
+	// CosyVoiceRefWav 是声音克隆参考音频路径.
+	// 如 "data/voice_ref.wav" 或绝对路径.
+	CosyVoiceRefWav string `toml:"cosyvoice_ref_wav"` // 参考音频路径
+
+	// CosyVoiceRefText 是参考音频的转录文本.
+	CosyVoiceRefText string `toml:"cosyvoice_ref_text"` // 参考音频转录文本
+
+	// CosyVoicePort 是 tts_server.py 监听端口, 默认 9880.
+	CosyVoicePort int `toml:"cosyvoice_port"` // tts_server.py 监听端口
+}
+
+// TTSProviderConfig 保存一个远程 TTS 供应商的连接参数。
+// 独立配置可以避免切换 provider 时误把其他平台的密钥发送出去。
+type TTSProviderConfig struct {
+	BaseURL     string  `toml:"base_url"`
+	APIKey      string  `toml:"api_key"`
+	WorkspaceID string  `toml:"workspace_id"`
+	Model       string  `toml:"model"`
+	Voice       string  `toml:"voice"`
+	SampleRate  int     `toml:"sample_rate"`
+	Speed       float64 `toml:"speed"`
+}
+
+// ProfileConfig 放用户画像分析配置.
+// 方案 16.12.6 节: 每轮对话打标签, 达到阈值后用统计数据调 LLM 归纳画像.
+type ProfileConfig struct {
+	// AnalysisThreshold 是触发画像分析所需的对话轮数.
+	// 每轮对话累加, 达到这个数后后台异步调 LLM 归纳画像, 然后计数器清零.
+	// 默认 30 轮.
+	AnalysisThreshold int `toml:"analysis_threshold"`
+}
+
+// EmotionConfig 放情绪感知配置.
+// 方案 16.12.6 节: 连续相同情绪合并为一段, 记录开始/结束/持续时长.
+type EmotionConfig struct {
+	// MaxHistorySessions 是注入 system prompt 的情绪段最大条数.
+	// 超过的旧段不注入, 只保留最近的. 默认 5 条.
+	MaxHistorySessions int `toml:"max_history_sessions"`
+}
+
+// ReminderConfig 放待办提醒配置.
+// 方案 16.12.6 节: 从对话提取 + 用户确认, 定时扫描到期提醒注入 system prompt.
+type ReminderConfig struct {
+	// ScanIntervalSeconds 是后台扫描到期提醒的间隔 (秒).
+	// 后台 goroutine 每隔这个时间查一次 pending 且到期的提醒.
+	// 默认 60 秒.
+	ScanIntervalSeconds int `toml:"scan_interval_seconds"`
+	// MaxInjectReminders 是注入 system prompt 的最大提醒条数.
+	// 超过的不注入, 只保留最近到期的. 默认 5 条.
+	MaxInjectReminders int `toml:"max_inject_reminders"`
 }

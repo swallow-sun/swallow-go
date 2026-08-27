@@ -6,6 +6,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 
@@ -49,14 +50,24 @@ func writeSSE(
 	// json.Marshal 是 Go 标准库 encoding/json 里的函数,
 	// 把任意 Go 数据(结构体, map, 切片等)转成 JSON 格式的字节切片 []byte
 	// 举个例子, map[string]string{"content":"你好"} 会变成 {"content":"你好"}
-	payload, err := json.Marshal(data)
-	if err != nil {
+	//
+	// 注意: json.Marshal 默认会做 HTML 转义(< → \u003c, > → \u003e, & → \u0026),
+	// 这是给 web 页面安全用的. 但 SSE 不是 HTML, C++ 客户端也不处理 \uXXXX 转义,
+	// 导致 LLM 回复里的 <tags> 变成 \u003ctags\u003e, C++ 解析不出原始的 <tags> 标记,
+	// 后续 TTS 剥离 <tags> 块就会失败, 把 JSON 标签当文字朗读.
+	// 所以这里用 Encoder + SetEscapeHTML(false) 关掉 HTML 转义.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(data); err != nil {
 		return fmt.Errorf(
 			"marshal SSE event %q: %w",
 			event,
 			err,
 		)
 	}
+	// Encode 会在末尾加一个换行, 去掉它, 我们自己拼 SSE 帧.
+	payload := bytes.TrimRight(buf.Bytes(), "\n")
 
 	// 一条标准 SSE 消息由 event 和 data 两行组成, 最后用两个换行表示该事件结束.
 	// 举个例子, 假设 event 是 "message", payload 是 {"content":"你好"},

@@ -39,6 +39,12 @@ func NewOpenAICompat(cfg Config) *OpenAICompat {
 // Transcribe 把音频数据发给 ASR 供应商, 拿回识别文字.
 // 流程: 构造 multipart 请求体 -> 发 POST -> 读响应 -> 解析 JSON -> 返回文字.
 func (p *OpenAICompat) Transcribe(ctx context.Context, req TranscribeRequest) (TranscribeResponse, error) {
+	if len(req.AudioData) == 0 {
+		return TranscribeResponse{}, newProviderError(
+			ProviderErrorInvalidInput, 0, "audio data is empty", nil,
+		)
+	}
+
 	// 第一步: 拼 URL. base_url + /audio/transcriptions
 	// 比如 https://api.groq.com/openai/v1 + /audio/transcriptions
 	url := p.config.BaseURL + "/audio/transcriptions"
@@ -50,19 +56,26 @@ func (p *OpenAICompat) Transcribe(ctx context.Context, req TranscribeRequest) (T
 
 	// 写 model 字段 (必须): 告诉 API 用哪个模型, 如 whisper-large-v3
 	if err := writer.WriteField("model", p.config.Model); err != nil {
-		return TranscribeResponse{}, fmt.Errorf("write model field: %w", err)
+		return TranscribeResponse{}, newProviderError(
+			ProviderErrorUnavailable, 0, "write model field", err,
+		)
 	}
 
 	// 写 language 字段 (可选): 如果指定了语言就传, 帮助模型更准确识别
-	if req.Language != "" {
-		if err := writer.WriteField("language", req.Language); err != nil {
-			return TranscribeResponse{}, fmt.Errorf("write language field: %w", err)
+	language := configuredLanguage(req.Language, p.config.Language)
+	if language != "" {
+		if err := writer.WriteField("language", language); err != nil {
+			return TranscribeResponse{}, newProviderError(
+				ProviderErrorUnavailable, 0, "write language field", err,
+			)
 		}
 	}
 
 	// 写 response_format 字段: OpenAI 兼容接口默认返回 json, 显式指定更稳妥
 	if err := writer.WriteField("response_format", "json"); err != nil {
-		return TranscribeResponse{}, fmt.Errorf("write response_format field: %w", err)
+		return TranscribeResponse{}, newProviderError(
+			ProviderErrorUnavailable, 0, "write response_format field", err,
+		)
 	}
 
 	// 写音频文件字段 (必须): CreateFormFile 会自动设 Content-Type 为 application/octet-stream,
@@ -78,23 +91,31 @@ func (p *OpenAICompat) Transcribe(ctx context.Context, req TranscribeRequest) (T
 	// CreatePart 返回一个 io.Writer, 往里面写音频数据
 	part, err := writer.CreatePart(hdr)
 	if err != nil {
-		return TranscribeResponse{}, fmt.Errorf("create file part: %w", err)
+		return TranscribeResponse{}, newProviderError(
+			ProviderErrorUnavailable, 0, "create file part", err,
+		)
 	}
 	// 把音频字节切片写进 part
 	if _, err := part.Write(req.AudioData); err != nil {
-		return TranscribeResponse{}, fmt.Errorf("write audio data: %w", err)
+		return TranscribeResponse{}, newProviderError(
+			ProviderErrorUnavailable, 0, "write audio data", err,
+		)
 	}
 
 	// writer.Close() 写入结束标记 (boundary 尾部), 之后 body 才是完整的 multipart 数据
 	if err := writer.Close(); err != nil {
-		return TranscribeResponse{}, fmt.Errorf("close multipart writer: %w", err)
+		return TranscribeResponse{}, newProviderError(
+			ProviderErrorUnavailable, 0, "close multipart writer", err,
+		)
 	}
 
 	// 第三步: 构造 HTTP 请求.
 	// bytes.NewReader 把 body 的字节切片包成 io.Reader 传给 http.NewRequestWithContext
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, &body)
 	if err != nil {
-		return TranscribeResponse{}, fmt.Errorf("new request: %w", err)
+		return TranscribeResponse{}, newProviderError(
+			ProviderErrorUnavailable, 0, "create request", err,
+		)
 	}
 
 	// 设 HTTP 请求头.
@@ -106,16 +127,36 @@ func (p *OpenAICompat) Transcribe(ctx context.Context, req TranscribeRequest) (T
 	// 第四步: 发请求.
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return TranscribeResponse{}, fmt.Errorf("http request: %w", err)
+		return TranscribeResponse{}, newProviderError(
+			ProviderErrorUnavailable, 0, "http request", err,
+		)
 	}
 	// defer 在函数返回时关闭响应体, 防止连接泄漏
 	defer resp.Body.Close()
 
-	// 第五步: 检查 HTTP 状态码. 200 才是成功, 其他都是出错.
-	if resp.StatusCode != http.StatusOK {
-		// 排干响应体让连接能复用
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return TranscribeResponse{}, fmt.Errorf("asr api error: status %d", resp.StatusCode)
+	// 第五步: 限制并读取响应体。先读取才能在失败时保留供应商错误详情，
+	// 同时避免异常上游返回无限大的响应占满内存。
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxASRResponseBytes+1))
+	if err != nil {
+		return TranscribeResponse{}, newProviderError(
+			ProviderErrorUnavailable, resp.StatusCode, "read response", err,
+		)
+	}
+	if len(responseBody) > maxASRResponseBytes {
+		return TranscribeResponse{}, newProviderError(
+			ProviderErrorInvalidResponse,
+			resp.StatusCode,
+			fmt.Sprintf("response exceeds %d bytes", maxASRResponseBytes),
+			nil,
+		)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return TranscribeResponse{}, newProviderError(
+			providerHTTPErrorKind(resp.StatusCode),
+			resp.StatusCode,
+			compactErrorBody(responseBody),
+			nil,
+		)
 	}
 
 	// 第六步: 解析 JSON 响应体.
@@ -124,8 +165,10 @@ func (p *OpenAICompat) Transcribe(ctx context.Context, req TranscribeRequest) (T
 		Text     string  `json:"text"`     // 识别出的文字
 		Duration float64 `json:"duration"` // 音频时长 (秒), 有些供应商不返回
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return TranscribeResponse{}, fmt.Errorf("decode response: %w", err)
+	if err := json.Unmarshal(responseBody, &apiResp); err != nil {
+		return TranscribeResponse{}, newProviderError(
+			ProviderErrorInvalidResponse, resp.StatusCode, "decode response", err,
+		)
 	}
 
 	// 返回识别结果

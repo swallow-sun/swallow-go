@@ -11,13 +11,16 @@
 //   - 方案 16.11.4 节: "memory_query 事件包含限制数, 返回数, 状态和耗时".
 //   - 方案 16.11.4 节: "查询无结果时正常返回空集合, 不制造虚假记忆".
 //   - 方案 16.11.4 节: "用户 A 的查询永远不会返回用户 B 的私人记忆".
-//   - 第一版用 LIKE, 不用向量检索.
+//   - 第一版从活跃记忆池中做词元匹配和时间排序, 不用向量检索.
 package memory
 
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/swallow-sun/swallow-go/internal/data"
 	"github.com/swallow-sun/swallow-go/internal/metrics"
@@ -26,6 +29,77 @@ import (
 	"github.com/swallow-sun/swallow-go/pkg/logger"
 	"go.uber.org/zap"
 )
+
+const retrievalPoolLimit = 200
+
+func memoryQueryTokens(value string) []string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	seen := map[string]struct{}{}
+	var tokens []string
+	add := func(token string) {
+		token = strings.TrimSpace(token)
+		if len([]rune(token)) < 2 {
+			return
+		}
+		if _, ok := seen[token]; !ok {
+			seen[token] = struct{}{}
+			tokens = append(tokens, token)
+		}
+	}
+	for _, field := range strings.FieldsFunc(value, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsPunct(r)
+	}) {
+		runes := []rune(field)
+		if len(runes) <= 4 {
+			add(field)
+		}
+		for i := 0; i+1 < len(runes); i++ {
+			add(string(runes[i : i+2]))
+		}
+	}
+	return tokens
+}
+
+func rankMemories(rows []data.Memory, query string, limit int) []data.Memory {
+	tokens := memoryQueryTokens(query)
+	if len(tokens) == 0 {
+		if len(rows) > limit {
+			return rows[:limit]
+		}
+		return rows
+	}
+	type scored struct {
+		row   data.Memory
+		score int
+	}
+	matched := make([]scored, 0, len(rows))
+	for _, row := range rows {
+		haystack := strings.ToLower(row.Content + " " + row.Keywords)
+		score := 0
+		for _, token := range tokens {
+			if strings.Contains(haystack, token) {
+				score++
+			}
+		}
+		if score > 0 {
+			matched = append(matched, scored{row: row, score: score})
+		}
+	}
+	sort.SliceStable(matched, func(i, j int) bool {
+		if matched[i].score != matched[j].score {
+			return matched[i].score > matched[j].score
+		}
+		return matched[i].row.UpdatedAt.After(matched[j].row.UpdatedAt)
+	})
+	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	result := make([]data.Memory, 0, len(matched))
+	for _, item := range matched {
+		result = append(result, item.row)
+	}
+	return result
+}
 
 // NewRetriever 创建一个 Retriever.
 func NewRetriever(repo data.Repository) *Retriever {
@@ -59,11 +133,18 @@ func (s *Retriever) Search(
 	// 记录查询开始时间, 后面算耗时
 	start := time.Now()
 
-	// 调 repo 检索, repo.SearchMemories 内部:
+	// 先调 repo 取最近的活跃记忆池:
 	//   - 按 user_id 过滤(跨用户隔离)
 	//   - 只查 status=active 的记录(排除已删除)
-	//   - keywords 不为空时用 LIKE 匹配 content 和 keywords 字段
-	rows, err := s.repo.SearchMemories(ctx, userID, keywords, limit)
+	//   - 再由 rankMemories 拆分中英文词元，避免用整句 LIKE 导致几乎永远查不到
+	poolLimit := retrievalPoolLimit
+	if limit > poolLimit {
+		poolLimit = limit
+	}
+	rows, err := s.repo.SearchMemories(ctx, userID, "", poolLimit)
+	if err == nil {
+		rows = rankMemories(rows, keywords, limit)
+	}
 
 	// time.Since(start) 算出从 start 到现在过了多久, 就是数据库查询耗时
 	elapsed := time.Since(start)

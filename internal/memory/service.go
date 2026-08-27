@@ -106,7 +106,7 @@ func (s *Service) UpdateMemory(ctx context.Context, id, userID int64, content, k
 	}
 
 	// 调 repo 做事务性更新
-	updated, err := s.repo.UpdateMemory(ctx, id, content, keywords)
+	updated, err := s.repo.UpdateMemory(ctx, id, userID, content, keywords)
 	if err != nil {
 		return data.Memory{}, fmt.Errorf("update memory: %w", err)
 	}

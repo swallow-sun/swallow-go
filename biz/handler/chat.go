@@ -117,7 +117,7 @@ func (d *Deps) chatForUser(
 	//   events — 一个 channel, service 层往里面塞 ChatEvent, handler 从里面读
 	//   err — 请求还没开始就失败了(幂等冲突, Agent 创建失败等), 直接写 HTTP 错误
 	// err == nil 说明流式对话已开始, 后面从 channel 读事件转 SSE
-	events, err := d.chat.Chat(ctx, req.SessionID, req.ClientMessageID, req.Message, userID, deviceID)
+	events, err := d.chat.Chat(ctx, req.SessionID, req.ClientMessageID, req.Message, userID, req.VoiceFeatures, deviceID)
 	if err != nil {
 		// service.FromChatError 尝试把 error 转成 *ChatError
 		// 转成了说明是业务错误(幂等冲突, 会话不存在等), 有明确的 HTTP 状态码和错误码

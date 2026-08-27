@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/swallow-sun/swallow-go/internal/data"
@@ -30,6 +31,20 @@ import (
 	"github.com/swallow-sun/swallow-go/pkg/logger"
 	"go.uber.org/zap"
 )
+
+func normalizeMemoryText(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(value)), " "))
+}
+
+func findDuplicateCandidate(rows []data.MemoryCandidate, spec CandidateSpec) (data.MemoryCandidate, bool) {
+	want := normalizeMemoryText(spec.Content)
+	for _, row := range rows {
+		if row.MemoryType == spec.MemoryType && normalizeMemoryText(row.Content) == want {
+			return row, true
+		}
+	}
+	return data.MemoryCandidate{}, false
+}
 
 // NewCandidateService 创建一个 CandidateService.
 // repo 是数据访问层接口, policy 是候选产生规则引擎.
@@ -75,11 +90,18 @@ func (s *CandidateService) CreateCandidates(
 	if len(specs) == 0 {
 		return []data.MemoryCandidate{}, nil
 	}
+	existing, err := s.repo.GetMemoryCandidates(ctx, userID, "")
+	if err != nil {
+		return nil, fmt.Errorf("list candidates for deduplication: %w", err)
+	}
 
 	// 逐条写入数据库
 	// 不用批量插入, 因为 SQLite 每条 INSERT 独立执行, GORM 的批量插入在 SQLite 上行为不一致
 	candidates := make([]data.MemoryCandidate, 0, len(specs))
 	for _, spec := range specs {
+		if _, duplicate := findDuplicateCandidate(existing, spec); duplicate {
+			continue
+		}
 		// CandidateSpec.ToMemoryCandidate 把 spec 转成 data.MemoryCandidate
 		candidate, err := s.repo.InsertMemoryCandidate(ctx, spec.ToMemoryCandidate())
 		if err != nil {
@@ -93,6 +115,7 @@ func (s *CandidateService) CreateCandidates(
 			continue
 		}
 		candidates = append(candidates, candidate)
+		existing = append(existing, candidate)
 	}
 
 	logger.Debug("memory candidates created",
@@ -112,6 +135,13 @@ func (s *CandidateService) CreateCandidate(ctx context.Context, spec CandidateSp
 			emitMemoryCandidateBlocked(ctx, spec.UserID, safety.Kind)
 			return data.MemoryCandidate{}, &SafetyError{Kind: safety.Kind}
 		}
+	}
+	existing, err := s.repo.GetMemoryCandidates(ctx, spec.UserID, "")
+	if err != nil {
+		return data.MemoryCandidate{}, fmt.Errorf("list candidates for deduplication: %w", err)
+	}
+	if duplicate, ok := findDuplicateCandidate(existing, spec); ok {
+		return duplicate, nil
 	}
 
 	// 调 repo 写入

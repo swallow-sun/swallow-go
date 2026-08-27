@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package swallow.tts;
+
+option go_package = "github.com/swallow-sun/swallow-go/proto;ttspb";
+
+// TTS 服务: 流式和非流式语音合成.
+// C++ 客户端通过 gRPC 调用, Go 服务端转发给 TTS provider (CosyVoice2/SiliconFlow).
+service TTS {
+  // 非流式合成: 一次性返回完整 WAV.
+  rpc Synthesize(SynthesizeRequest) returns (SynthesizeResponse);
+
+  // 流式合成: 逐块返回 PCM 数据 (先 44 字节 WAV 头, 再逐块 PCM16).
+  // 客户端边收边播放, 减少首包延迟.
+  rpc StreamSynthesize(SynthesizeRequest) returns (stream AudioChunk);
+}
+
+// 合成请求.
+message SynthesizeRequest {
+  // 要合成的纯净文本 (不含 <tags>).
+  string text = 1;
+
+  // 语气标签 (calm/warm/cheerful/... ), 空字符串表示不加语气控制.
+  // Go 服务端会拼装 CosyVoice2 instruct2 指令.
+  string tone = 2;
+
+  // 设备 ID, 从 gRPC metadata 的 Authorization 头解析, 用于日志.
+  // 不需要客户端显式传, 这里保留用于服务端日志关联.
+  string device_id = 3;
+}
+
+// 非流式合成响应.
+message SynthesizeResponse {
+  // 完整 WAV 文件字节 (含 44 字节 WAV 头 + PCM16 数据).
+  bytes audio_data = 1;
+
+  // 音频格式, 固定 "wav".
+  string audio_format = 2;
+}
+
+// 流式合成的一个数据块.
+message AudioChunk {
+  // PCM 数据块.
+  // 第一个 chunk 是 44 字节 WAV 头 (dataSize=0), 后续 chunk 是裸 PCM16.
+  bytes data = 1;
+
+  // 采样率, 从 WAV 头解析. 客户端用它初始化 waveOut 设备.
+  // 只在第一个 chunk (WAV 头) 中有意义, 后续 chunk 为 0.
+  int32 sample_rate = 2;
+}

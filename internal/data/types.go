@@ -186,6 +186,14 @@ type Repository interface {
 	// 多个 Span 共享同一个 trace_id,通过 parent_span_id 组成调用链树.
 	InsertSpan(ctx context.Context, span Span) error
 
+	// ===== 设备同步 =====
+
+	// InsertDeviceSyncLog 原子插入一条设备同步日志, 用 (device_id, item_id) 做幂等.
+	// 返回 created=true 表示这是首次接收, created=false 表示重复条目已存在.
+	InsertDeviceSyncLog(ctx context.Context, log DeviceSyncLog) (bool, error)
+	// DeleteDeviceSyncLog 撤销处理失败条目的幂等占位，使设备下次可以安全重试.
+	DeleteDeviceSyncLog(ctx context.Context, deviceID, itemID string) error
+
 	// ===== 长期记忆: 候选管理 =====
 
 	// InsertMemoryCandidate 创建一条记忆候选.
@@ -213,10 +221,62 @@ type Repository interface {
 	// SearchMemories 按用户 ID + 关键词检索记忆, 只搜 status=active 的记录.
 	// 第一版用 LIKE, 不用向量.
 	SearchMemories(ctx context.Context, userID int64, keywords string, limit int) ([]Memory, error)
+	// GetMemorySyncChanges 按同步版本返回设备需要应用的记忆和删除墓碑.
+	GetMemorySyncChanges(ctx context.Context, userID int64, sinceVersion, limit int) (MemorySyncChanges, error)
 	// UpdateMemory 编辑记忆内容和关键词, 同时写一条版本记录到 memory_versions.
-	UpdateMemory(ctx context.Context, id int64, content, keywords string) (Memory, error)
+	UpdateMemory(ctx context.Context, id int64, userID int64, content, keywords string) (Memory, error)
 	// DeleteMemory 软删记忆(status=deleted), 同时写一条 tombstone.
 	DeleteMemory(ctx context.Context, id int64, userID int64) error
+
+	// ===== 阶段 4.5: 对话标签 =====
+
+	// InsertDialogueTag 创建一条对话标签明细.
+	InsertDialogueTag(ctx context.Context, tag DialogueTag) (DialogueTag, error)
+	// GetDialogueTags 按用户 ID 查标签明细, 按时间倒序, 限制条数.
+	GetDialogueTags(ctx context.Context, userID int64, limit int) ([]DialogueTag, error)
+	// CountDialogueTagsByUser 统计用户当前的对话轮数 (最大的 round 值).
+	CountDialogueTagsByUser(ctx context.Context, userID int64) (int, error)
+
+	// ===== 阶段 4.5: 标签统计 =====
+
+	// UpsertTagStatistic UPSERT 一条按天聚合的标签统计.
+	UpsertTagStatistic(ctx context.Context, stat TagStatistic) error
+	// GetTagStatistics 查标签统计, 可按维度过滤, since > 0 时只查 last_round > since 的记录.
+	GetTagStatistics(ctx context.Context, userID int64, tagDim string, since int) ([]TagStatistic, error)
+
+	// ===== 阶段 4.5: 情绪持续段 =====
+
+	// InsertEmotionSession 创建一条情绪持续段.
+	InsertEmotionSession(ctx context.Context, session EmotionSession) (EmotionSession, error)
+	// UpdateEmotionSession 更新一条情绪持续段 (延长或结束).
+	UpdateEmotionSession(ctx context.Context, id int64, fields map[string]any) error
+	// GetLatestEmotionSession 取用户最近一条情绪持续段 (可能是进行中或已结束).
+	GetLatestEmotionSession(ctx context.Context, userID int64) (EmotionSession, error)
+	// GetEmotionSessions 查情绪持续段列表, since > 0 时只查 start_round > since 的记录.
+	GetEmotionSessions(ctx context.Context, userID int64, since int, limit int) ([]EmotionSession, error)
+
+	// ===== 阶段 4.5: 用户画像 =====
+
+	// GetUserProfile 按用户 ID 查画像.
+	GetUserProfile(ctx context.Context, userID int64) (UserProfile, error)
+	// UpsertUserProfile 创建或更新用户画像.
+	UpsertUserProfile(ctx context.Context, profile UserProfile) (UserProfile, error)
+	// GetCompanionState / UpsertCompanionState 读写用户与 Agent 的关系人格状态。
+	GetCompanionState(ctx context.Context, userID int64) (CompanionState, error)
+	UpsertCompanionState(ctx context.Context, state CompanionState) (CompanionState, error)
+
+	// ===== 阶段 4.5: 待办提醒 =====
+
+	// InsertReminder 创建一条待办提醒.
+	InsertReminder(ctx context.Context, reminder Reminder) (Reminder, error)
+	// GetReminders 按用户 ID 和状态查提醒列表.
+	GetReminders(ctx context.Context, userID int64, status string) ([]Reminder, error)
+	// GetReminder 按 ID 查一条提醒.
+	GetReminder(ctx context.Context, id int64) (Reminder, error)
+	// UpdateReminder 更新一条提醒 (改状态/改时间/改内容).
+	UpdateReminder(ctx context.Context, id int64, fields map[string]any) error
+	// GetPendingRemindersDue 查已到期但尚未投递的提醒 (status=pending AND remind_at <= now).
+	GetPendingRemindersDue(ctx context.Context, now time.Time) ([]Reminder, error)
 
 	// Close 关闭数据库连接.
 	Close() error
@@ -950,6 +1010,9 @@ const (
 	// model_usage_daily 表列名
 	modelUsageDailyColumns = "id, date, device_id, user_id, provider, model, operation, request_count, failed_count, input_tokens, output_tokens, cached_input_tokens, estimated_cost_micros, currency"
 
+	// device_sync_log 表列名
+	deviceSyncLogColumns = "id, device_id, user_id, item_id, item_type, payload, received_at"
+
 	// memory_candidates 表列名
 	memoryCandidateColumns = "id, user_id, session_id, trace_id, content, memory_type, source, reason, usage_hint, status, created_at, resolved_at"
 
@@ -961,7 +1024,279 @@ const (
 
 	// memory_tombstones 表列名
 	memoryTombstoneColumns = "id, memory_id, user_id, sync_version, deleted_at"
+
+	// dialogue_tags 表列名
+	dialogueTagColumns = "id, user_id, session_id, trace_id, round, tag_dim, tag_value, tag_extra, trigger_reason, source, created_at"
+
+	// tag_statistics 表列名
+	tagStatisticColumns = "user_id, tag_dim, tag_value, period, hit_count, last_round, updated_at"
+
+	// emotion_sessions 表列名
+	emotionSessionColumns = "id, user_id, emotion, intensity, urgency, cooperation, trigger, start_round, end_round, start_at, end_at, duration_minutes, trace_id, created_at"
+
+	// user_profiles 表列名
+	userProfileColumns = "id, user_id, profile_json, analyzed_rounds, analysis_count, updated_at, created_at"
+
+	// reminders 表列名
+	reminderColumns = "id, user_id, session_id, trace_id, content, remind_at, status, source, created_at, delivered_at, acknowledged_at"
 )
+
+// ============================================================
+// 阶段 4.5: 用户画像、情绪感知与主动提醒相关业务对象和 ORM 模型
+// 方案 16.12.6 节
+// ============================================================
+
+// 标签来源常量.
+const (
+	// TagSourceLLM 表示标签由 LLM 输出.
+	TagSourceLLM = "llm"
+	// TagSourceRule 表示标签由 Go 规则提取.
+	TagSourceRule = "rule"
+)
+
+// 提醒状态常量.
+const (
+	// ReminderStatusPending 表示提醒等待触发.
+	ReminderStatusPending = "pending"
+	// ReminderStatusDelivered 表示提醒已投递 (已注入 system prompt).
+	ReminderStatusDelivered = "delivered"
+	// ReminderStatusAcknowledged 表示用户已确认收到.
+	ReminderStatusAcknowledged = "acknowledged"
+	// ReminderStatusExpired 表示提醒已过期未确认.
+	ReminderStatusExpired = "expired"
+	// ReminderStatusCancelled 表示提醒已取消.
+	ReminderStatusCancelled = "cancelled"
+)
+
+// 提醒来源常量.
+const (
+	// ReminderSourceDialogue 表示提醒从对话中提取.
+	ReminderSourceDialogue = "dialogue"
+	// ReminderSourceManual 表示提醒由用户手动创建.
+	ReminderSourceManual = "manual"
+)
+
+// DialogueTag 是一条对话标签明细 (业务对象).
+// 每轮对话的每个维度各一行, LLM 输出和 Go 规则提取的都存这里.
+type DialogueTag struct {
+	ID            int64   // 自增主键
+	UserID        int64   // 哪个用户的标签
+	SessionID     string  // 来源会话 ID
+	TraceID       string  // 来源对话的 trace ID
+	Round         int     // 第几轮对话
+	TagDim        string  // 维度名: emotion, communication_style, topic...
+	TagValue      string  // 标签值: frustrated, direct, cpp...
+	TagExtra      float64 // 数值型标签的值 (如 intensity=0.6), 0 表示无
+	TriggerReason string  // 情绪触发原因 (只有情绪维度用)
+	Source        string  // 来源: llm / rule
+	CreatedAt     time.Time
+}
+
+// ormDialogueTag 是 dialogue_tags 表的 GORM ORM 模型.
+type ormDialogueTag struct {
+	ID            int64  `gorm:"primaryKey;autoIncrement"`
+	UserID        int64  `gorm:"not null;index:idx_dialogue_tags_user_round,priority:1"`
+	SessionID     string `gorm:"not null"`
+	TraceID       *string
+	Round         int    `gorm:"not null;index:idx_dialogue_tags_user_round,priority:2"`
+	TagDim        string `gorm:"not null;index:idx_dialogue_tags_dim_time,priority:1"`
+	TagValue      string `gorm:"not null"`
+	TagExtra      *float64
+	TriggerReason string    `gorm:"not null;default:''"`
+	Source        string    `gorm:"not null;default:llm"`
+	CreatedAt     time.Time `gorm:"not null;index:idx_dialogue_tags_dim_time,priority:2:desc"`
+}
+
+// TagStatistic 是一条按天聚合的标签统计 (业务对象).
+type TagStatistic struct {
+	UserID    int64
+	TagDim    string
+	TagValue  string
+	Period    string // 'YYYY-MM-DD'
+	HitCount  int
+	LastRound int
+	UpdatedAt time.Time
+}
+
+// ormTagStatistic 是 tag_statistics 表的 GORM ORM 模型.
+type ormTagStatistic struct {
+	UserID    int64     `gorm:"primaryKey;index:idx_tag_stats_user_dim_val,priority:1"`
+	TagDim    string    `gorm:"primaryKey;index:idx_tag_stats_user_dim_val,priority:2"`
+	TagValue  string    `gorm:"primaryKey;index:idx_tag_stats_user_dim_val,priority:3"`
+	Period    string    `gorm:"primaryKey"`
+	HitCount  int       `gorm:"not null;default:0"`
+	LastRound int       `gorm:"not null;default:0"`
+	UpdatedAt time.Time `gorm:"not null"`
+}
+
+// EmotionSession 是一条情绪持续段记录 (业务对象).
+type EmotionSession struct {
+	ID              int64
+	UserID          int64
+	Emotion         string
+	Intensity       float64
+	Urgency         string
+	Cooperation     string
+	Trigger         string
+	StartRound      int
+	EndRound        *int
+	StartAt         time.Time
+	EndAt           *time.Time
+	DurationMinutes *float64
+	TraceID         string
+	CreatedAt       time.Time
+}
+
+// ormEmotionSession 是 emotion_sessions 表的 GORM ORM 模型.
+type ormEmotionSession struct {
+	ID              int64   `gorm:"primaryKey;autoIncrement"`
+	UserID          int64   `gorm:"not null;index:idx_emotion_sessions_user,priority:1"`
+	Emotion         string  `gorm:"not null"`
+	Intensity       float64 `gorm:"not null;default:0.5"`
+	Urgency         string  `gorm:"not null;default:normal"`
+	Cooperation     string  `gorm:"not null;default:normal"`
+	Trigger         string  `gorm:"not null;default:''"`
+	StartRound      int     `gorm:"not null"`
+	EndRound        *int
+	StartAt         time.Time `gorm:"not null;index:idx_emotion_sessions_user,priority:2:desc"`
+	EndAt           *time.Time
+	DurationMinutes *float64
+	TraceID         *string
+	CreatedAt       time.Time `gorm:"not null"`
+}
+
+// UserProfile 是用户画像 (业务对象).
+type UserProfile struct {
+	ID             int64
+	UserID         int64
+	ProfileJSON    string
+	AnalyzedRounds int
+	AnalysisCount  int
+	UpdatedAt      time.Time
+	CreatedAt      time.Time
+}
+
+// CompanionState 是可解释的关系人格状态，不代表真实主观意识。
+type CompanionState struct {
+	UserID              int64
+	Concern             float64
+	Urgency             float64
+	Fondness            float64
+	Playfulness         float64
+	AllowTeasing        bool
+	AllowStrictReminder bool
+	AllowAffection      bool
+	LastMode            string
+	CurrentTask         string
+	TaskUpdatedAt       *time.Time
+	InteractionCount    int
+	UpdatedAt           time.Time
+}
+
+type ormCompanionState struct {
+	UserID              int64   `gorm:"primaryKey"`
+	Concern             float64 `gorm:"not null;default:0"`
+	Urgency             float64 `gorm:"not null;default:0"`
+	Fondness            float64 `gorm:"not null;default:0.5"`
+	Playfulness         float64 `gorm:"not null;default:0.3"`
+	AllowTeasing        bool    `gorm:"not null;default:true"`
+	AllowStrictReminder bool    `gorm:"not null;default:true"`
+	AllowAffection      bool    `gorm:"not null;default:true"`
+	LastMode            string  `gorm:"not null;default:neutral"`
+	CurrentTask         string  `gorm:"not null;default:''"`
+	TaskUpdatedAt       *time.Time
+	InteractionCount    int       `gorm:"not null;default:0"`
+	UpdatedAt           time.Time `gorm:"not null"`
+}
+
+// ormUserProfile 是 user_profiles 表的 GORM ORM 模型.
+type ormUserProfile struct {
+	ID             int64     `gorm:"primaryKey;autoIncrement"`
+	UserID         int64     `gorm:"not null;uniqueIndex:idx_user_profiles_user"`
+	ProfileJSON    string    `gorm:"not null;default:'{}'"`
+	AnalyzedRounds int       `gorm:"not null;default:0"`
+	AnalysisCount  int       `gorm:"not null;default:0"`
+	UpdatedAt      time.Time `gorm:"not null"`
+	CreatedAt      time.Time `gorm:"not null"`
+}
+
+// Reminder 是一条待办提醒 (业务对象).
+type Reminder struct {
+	ID             int64
+	UserID         int64
+	SessionID      string
+	TraceID        string
+	Content        string
+	RemindAt       time.Time
+	Status         string
+	Source         string
+	CreatedAt      time.Time
+	DeliveredAt    *time.Time
+	AcknowledgedAt *time.Time
+}
+
+// ormReminder 是 reminders 表的 GORM ORM 模型.
+type ormReminder struct {
+	ID             int64  `gorm:"primaryKey;autoIncrement"`
+	UserID         int64  `gorm:"not null;index:idx_reminders_user_status,priority:1"`
+	SessionID      string `gorm:"not null"`
+	TraceID        *string
+	Content        string    `gorm:"not null"`
+	RemindAt       time.Time `gorm:"not null;index:idx_reminders_user_status,priority:2;index:idx_reminders_due,priority:2"`
+	Status         string    `gorm:"not null;default:pending;index:idx_reminders_user_status,priority:3;index:idx_reminders_due,priority:1"`
+	Source         string    `gorm:"not null;default:dialogue"`
+	CreatedAt      time.Time `gorm:"not null"`
+	DeliveredAt    *time.Time
+	AcknowledgedAt *time.Time
+}
+
+// ============================================================
+// 设备同步相关业务对象和 ORM 模型
+// ============================================================
+
+// DeviceSyncLog 是设备同步日志的一条记录(业务对象).
+// 设备把 sync_outbox 里的条目 POST 到服务端, 服务端用 (device_id, item_id) 做幂等.
+// created=false 表示这条之前已经收过了, 设备可以安全地从 outbox 删除.
+// DeviceSyncLogItem 是 sync 请求体里的一条条目, 不是数据库表.
+// 它对应 C++ 侧 SyncOutboxItem 的 JSON 序列化形式.
+type DeviceSyncLog struct {
+	// ID 数据库自增主键
+	ID int64
+	// DeviceID 哪台设备上报的
+	DeviceID string
+	// UserID 设备所属用户 ID
+	UserID int64
+	// ItemID 同步条目 ID (C++ 侧的 item_id, 即 event_id 或 message_id)
+	ItemID string
+	// ItemType 条目类型: "message" 或 "event"
+	ItemType string
+	// Payload JSON 字符串, 包含完整的消息或事件数据
+	Payload string
+	// ReceivedAt 服务端接收时间
+	ReceivedAt time.Time
+}
+
+// ormDeviceSyncLog 是 device_sync_log 表的 GORM ORM 模型.
+// 唯一索引 (device_id, item_id) 保证幂等: 同一设备同一条目不会重复入库.
+type ormDeviceSyncLog struct {
+	// ID 自增主键
+	ID int64 `gorm:"primaryKey;autoIncrement"`
+	// DeviceID 设备 ID, 唯一索引第一列
+	DeviceID string `gorm:"not null;uniqueIndex:idx_device_sync_log_item,priority:1"`
+	// UserID 用户 ID
+	UserID int64 `gorm:"not null"`
+	// ItemID 同步条目 ID, 唯一索引第二列
+	ItemID string `gorm:"not null;uniqueIndex:idx_device_sync_log_item,priority:2"`
+	// ItemType 条目类型: "message" 或 "event"
+	ItemType string `gorm:"not null"`
+	// Payload JSON 字符串
+	Payload string `gorm:"not null"`
+	// ReceivedAt 接收时间
+	ReceivedAt time.Time `gorm:"not null"`
+}
+
+// ormDeviceSyncLog TableName 指定 GORM 映射的表名.
+func (ormDeviceSyncLog) TableName() string { return "device_sync_log" }
 
 // ============================================================
 // 长期记忆相关业务对象和 ORM 模型
@@ -1082,7 +1417,7 @@ type Memory struct {
 	MemoryType string
 	// Keywords 关键词, 空格分隔, 用于检索
 	Keywords string
-	// SyncVersion 同步版本号, C++ 设备同步用, 本阶段为 0
+	// SyncVersion 用户级单调同步版本号，C++ 设备按此增量拉取。
 	SyncVersion int
 	// Status 状态: active/deleted
 	Status string
@@ -1169,6 +1504,14 @@ type MemoryTombstone struct {
 	SyncVersion int
 	// DeletedAt 删除时间
 	DeletedAt time.Time
+}
+
+// MemorySyncChanges 是一页严格按 sync_version 切分的增量数据。
+type MemorySyncChanges struct {
+	Memories    []Memory
+	Tombstones  []MemoryTombstone
+	NextVersion int
+	HasMore     bool
 }
 
 // ormMemoryTombstone 是 memory_tombstones 表的 GORM ORM 模型.

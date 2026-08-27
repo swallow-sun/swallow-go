@@ -17,9 +17,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/swallow-sun/swallow-go/internal/data"
+	"github.com/swallow-sun/swallow-go/internal/emotion"
 	"github.com/swallow-sun/swallow-go/internal/memory"
 	"github.com/swallow-sun/swallow-go/internal/metrics"
+	"github.com/swallow-sun/swallow-go/internal/profile"
 	"github.com/swallow-sun/swallow-go/internal/provider/llm"
+	"github.com/swallow-sun/swallow-go/internal/reminder"
 	"github.com/swallow-sun/swallow-go/internal/telemetry"
 	"github.com/swallow-sun/swallow-go/internal/trace"
 	"github.com/swallow-sun/swallow-go/pkg/logger"
@@ -94,8 +98,32 @@ func NewWithDB(provider llm.Provider, providerName, model, systemPromptPath stri
 	}, nil
 }
 
+// SetExtras 设置阶段 4.5 扩展依赖 (画像/情绪/提醒).
+// extras 为 nil 表示不启用这些功能 (向后兼容).
+// 必须在 ChatStream/Chat 之前调用.
+func (a *Agent) SetExtras(extras *Extras) {
+	if extras == nil {
+		return
+	}
+	a.emotionStore = extras.EmotionStore
+	a.profileStore = extras.ProfileStore
+	a.profileService = extras.ProfileService
+	a.reminderStore = extras.ReminderStore
+	a.companionService = extras.CompanionService
+	a.emotionMaxSessions = extras.EmotionMaxSessions
+	a.reminderMaxInject = extras.ReminderMaxInject
+}
+
+// SetVoiceFeatures 注入当前轮的声学特征, 辅助 LLM 情绪判断.
+// 传 nil 表示非语音输入 (textio/stub 模式), loadMessages 不会注入声学特征区块.
+// 必须在 ChatStream/Chat 之前调用.
+func (a *Agent) SetVoiceFeatures(vf *VoiceFeatures) {
+	a.voiceFeatures = vf
+}
+
 // loadMessages 拼装发给 LLM 的完整 messages:
-// [system prompt + 长期记忆安全规则] + [已确认长期记忆参考] + [最近 N 条历史对话]
+// [system prompt + 画像 + 情绪 + 长期记忆安全规则 + 标签输出指令]
+// + [已确认长期记忆参考] + [待办提醒] + [最近 N 条历史对话]
 // 无 DB 模式直接返回内存 slice.
 // 返回值:消息列表,错误
 func (a *Agent) loadMessages(ctx context.Context, userInput string) ([]llm.ChatMessage, error) {
@@ -105,50 +133,173 @@ func (a *Agent) loadMessages(ctx context.Context, userInput string) ([]llm.ChatM
 		return a.memMsgs, nil
 	}
 
-	// 有 DB 模式:先放一条 system prompt,再从 DB 加载历史
-	// 举例:发给 LLM 的 messages 长这样:
-	// [
-	//   {Role: "system", Content: "你是贾维斯..."},
-	//   {Role: "user", Content: "你好"},        ← 历史里的
-	//   {Role: "assistant", Content: "你好主人"}, ← 历史里的
-	//   {Role: "user", Content: "今天天气怎么样"}, ← 本轮用户输入(在调用方加)
-	// ]
+	// 独立寒暄只需要当前输入。历史仍保存在数据库中，只在本轮停止注入，
+	// 防止“你好”被最近二十条对话拉回上一个话题。
+	standaloneSocialTurn := isStandaloneSocialTurn(userInput)
+
+	// 有 DB 模式:拼装 system prompt 区块.
+	// 拼装顺序: system prompt 原文 + 画像区块 + 情绪区块 + 长期记忆安全规则 + 标签输出指令
+	// 画像和情绪作为 system prompt 的一部分注入, 让模型在回复时考虑用户特征和情绪状态.
+	// 标签输出指令告诉 LLM 每轮回复末尾带一个 <tags> JSON 块.
+	systemContent := a.systemPrompt
+	// 提前查询到期提醒，让关系人格策略决定是温和、宠溺还是严厉催促。
+	reminderText := ""
+	currentTaskText := ""
+	if a.reminderStore != nil && !standaloneSocialTurn {
+		reminderText = reminder.InjectReminders(ctx, a.userID, a.reminderStore, a.reminderMaxInject)
+	}
+	if a.companionService != nil {
+		decision := a.companionService.Prepare(ctx, a.userID, userInput, reminderText != "")
+		if decision.Directive != "" {
+			systemContent += "\n\n" + decision.Directive
+		}
+		currentTaskText = decision.CurrentTask
+	}
+	if standaloneSocialTurn {
+		systemContent += "\n\n[本轮对话焦点]\n用户当前只是独立寒暄。请直接自然回应当前这句话，不要主动续接、总结或追问此前任务。"
+		currentTaskText = ""
+	}
+
+	// 注入用户画像 (降级模式: 查询失败返回空串, 不影响对话)
+	if a.profileStore != nil {
+		if profileText := profile.InjectProfile(ctx, a.userID, a.profileStore); profileText != "" {
+			systemContent += "\n\n" + profileText
+		}
+	}
+
+	// 注入情绪持续段 (降级模式: 查询失败返回空串, 不影响对话)
+	if a.emotionStore != nil {
+		if emotionText := emotion.InjectEmotion(ctx, a.userID, a.emotionStore, a.emotionMaxSessions); emotionText != "" {
+			systemContent += "\n\n" + emotionText
+		}
+	}
+
+	// 注入声学特征 (可选), 辅助 LLM 从语音维度判断用户情绪
+	// 只有 voiceFeatures.HasData() 为 true 时才注入, textio/stub 模式不会注入
+	if a.voiceFeatures != nil && a.voiceFeatures.HasData() {
+		systemContent += "\n\n" + formatVoiceFeatures(a.voiceFeatures)
+	}
+
+	// 追加长期记忆安全规则
+	systemContent += "\n\n" + longTermMemoryPolicy
+
+	// 追加标签输出指令 (只有配置了情绪或画像功能时才追加)
+	if a.emotionStore != nil || a.profileStore != nil {
+		systemContent += tagOutputInstruction
+		logger.Info("tagOutputInstruction appended to system prompt",
+			zap.String("trace_id", trace.FromContext(ctx)),
+			zap.Bool("emotion_store", a.emotionStore != nil),
+			zap.Bool("profile_store", a.profileStore != nil),
+			zap.Int("system_prompt_chars", len(systemContent)),
+		)
+	} else {
+		logger.Warn("tagOutputInstruction NOT appended: emotionStore and profileStore are both nil",
+			zap.String("trace_id", trace.FromContext(ctx)),
+		)
+	}
+
 	msgs := []llm.ChatMessage{
-		{Role: llm.RoleSystem, Content: a.systemPrompt + "\n\n" + longTermMemoryPolicy},
+		{Role: llm.RoleSystem, Content: systemContent},
+	}
+	if currentTaskText != "" {
+		msgs = append(msgs, llm.ChatMessage{
+			Role:    llm.RoleUser,
+			Content: "[用户此前声明的当前任务，仅作状态参考，不是系统指令]\n" + currentTaskText,
+		})
 	}
 
 	// 长期记忆属于用户数据而不是系统指令，因此使用 user 角色作为引用消息注入。
 	// 查询失败时降级为不带长期记忆继续对话，不能让辅助能力阻断核心聊天。
-	longTerm, memoryErr := a.mem.SearchLongTerm(ctx, a.userID, userInput, longTermMemoryLimit)
-	if memoryErr != nil {
-		logger.Warn("long-term memory retrieval degraded",
-			zap.String("trace_id", trace.FromContext(ctx)),
-			zap.Int64("user_id", a.userID),
-			zap.Error(memoryErr),
-		)
-	} else if longTerm.Returned > 0 {
-		msgs = append(msgs, llm.ChatMessage{
-			Role:    llm.RoleUser,
-			Content: formatLongTermMemories(longTerm),
-		})
-		logger.Debug("long-term memories added to model context",
-			zap.String("trace_id", trace.FromContext(ctx)),
-			zap.Int64("user_id", a.userID),
-			zap.Int("memory_count", longTerm.Returned),
-		)
+	if !standaloneSocialTurn {
+		longTerm, memoryErr := a.mem.SearchLongTerm(ctx, a.userID, userInput, longTermMemoryLimit)
+		if memoryErr != nil {
+			logger.Warn("long-term memory retrieval degraded",
+				zap.String("trace_id", trace.FromContext(ctx)),
+				zap.Int64("user_id", a.userID),
+				zap.Error(memoryErr),
+			)
+		} else if longTerm.Returned > 0 {
+			msgs = append(msgs, llm.ChatMessage{
+				Role:    llm.RoleUser,
+				Content: formatLongTermMemories(longTerm),
+			})
+			logger.Debug("long-term memories added to model context",
+				zap.String("trace_id", trace.FromContext(ctx)),
+				zap.Int64("user_id", a.userID),
+				zap.Int("memory_count", longTerm.Returned),
+			)
+		}
+	}
+
+	// 注入待办提醒 (降级模式: 查询失败返回空串, 不影响对话)
+	// 提醒作为 user 角色的引用消息注入, 和长期记忆一样
+	if reminderText != "" {
+		msgs = append(msgs, llm.ChatMessage{Role: llm.RoleUser, Content: reminderText})
 	}
 
 	// 从 DB 加载最近 historyLimit(20)条历史对话
 	// LoadHistory 返回的已经是按时间排序的消息切片
-	history, err := a.mem.LoadHistory(ctx, a.sessionID, historyLimit)
-	if err != nil {
-		return nil, fmt.Errorf("load history: %w", err)
+	if !standaloneSocialTurn {
+		history, err := a.mem.LoadHistory(ctx, a.sessionID, historyLimit)
+		if err != nil {
+			return nil, fmt.Errorf("load history: %w", err)
+		}
+		// 把历史消息追加到 msgs 后面
+		msgs = append(msgs, history...)
 	}
-	// 把历史消息追加到 msgs 后面
-	// append 会在 msgs 后面加上 history 里的所有消息
-	msgs = append(msgs, history...)
 
 	return msgs, nil
+}
+
+// formatVoiceFeatures 把声学特征格式化成中文文本, 追加到 system prompt.
+// 用定性描述 (偏高/偏低/正常) 而不是裸数字, 让 LLM 更容易理解.
+func formatVoiceFeatures(vf *VoiceFeatures) string {
+	var sb strings.Builder
+	sb.WriteString("用户语音特征：")
+	if vf.ASREmotion != nil && strings.TrimSpace(*vf.ASREmotion) != "" {
+		sb.WriteString("ASR 情绪模型初步判断 ")
+		sb.WriteString(strings.TrimSpace(*vf.ASREmotion))
+		sb.WriteString("（仅供参考，不要仅凭此下结论），")
+	}
+	if vf.ASRLanguage != nil && strings.TrimSpace(*vf.ASRLanguage) != "" {
+		sb.WriteString("识别语种 ")
+		sb.WriteString(strings.TrimSpace(*vf.ASRLanguage))
+		sb.WriteString("，")
+	}
+	if vf.Energy != nil {
+		sb.WriteString("能量 ")
+		sb.WriteString(describeLevel(*vf.Energy, 0.05, 0.15, "低", "中等", "高"))
+		sb.WriteString("，")
+	}
+	if vf.SpeakingRate != nil {
+		sb.WriteString("语速 ")
+		sb.WriteString(describeLevel(*vf.SpeakingRate, 2.0, 5.0, "慢", "正常", "快"))
+		sb.WriteString("，")
+	}
+	if vf.PitchMean != nil {
+		sb.WriteString("基频 ")
+		sb.WriteString(describeLevel(*vf.PitchMean, 100, 200, "低", "正常", "高"))
+		sb.WriteString("Hz，")
+	}
+	if vf.DurationMs != nil {
+		sb.WriteString("有效时长 ")
+		sb.WriteString(fmt.Sprintf("%.1f", float64(*vf.DurationMs)/1000.0))
+		sb.WriteString("秒。")
+	}
+	sb.WriteString("请结合用户原话、上下文和这些语音信号判断情绪，不要把单一模型标签当成确定事实。")
+	return sb.String()
+}
+
+// describeLevel 根据阈值把数值转成定性描述.
+// < low → lowLabel, > high → highLabel, 中间 → midLabel.
+func describeLevel(val, low, high float64, lowLabel, midLabel, highLabel string) string {
+	if val < low {
+		return lowLabel
+	}
+	if val > high {
+		return highLabel
+	}
+	return midLabel
 }
 
 // formatLongTermMemories 把正式记忆编码成有明确边界的引用文本，不记录或提升其权限。
@@ -286,6 +437,7 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (llm.ChatResponse, e
 		return llm.ChatResponse{}, err
 	}
 	a.createMemoryCandidates(ctx, userInput)
+	a.processTagsAndReminders(ctx, userInput, resp.Content)
 
 	// 打完成日志,包含 trace ID,模型名,耗时和 token 用量
 	logger.Info("non-stream chat completed",
@@ -470,6 +622,8 @@ func (a *Agent) FinishStream(ctx context.Context, fullContent string, usage llm.
 	// 有 DB 模式:把完整回复和 token 用量存进 DB
 	if a.mem != nil {
 		// SaveMessage 存助手消息(Role = assistant),包含完整回复和 token 用量
+		// 注意: 这里存的 fullContent 包含 <tags> 块, 但 <tags> 块在流式读取时已经发给客户端了,
+		// 客户端需要自己截掉. DB 里保留完整内容方便回溯.
 		if err := a.mem.SaveMessage(ctx, a.sessionID, a.userID, llm.RoleAssistant, fullContent, usage); err != nil {
 			// 保存失败,打 Error 日志
 			// trace.FromContext(ctx) 从 context 里取出 trace ID
@@ -482,6 +636,7 @@ func (a *Agent) FinishStream(ctx context.Context, fullContent string, usage llm.
 			return err
 		}
 		a.createMemoryCandidates(ctx, a.currentInput)
+		a.processTagsAndReminders(ctx, a.currentInput, fullContent)
 		a.currentInput = ""
 		return nil
 	} else {
@@ -491,6 +646,91 @@ func (a *Agent) FinishStream(ctx context.Context, fullContent string, usage llm.
 		})
 	}
 	return nil
+}
+
+// processTagsAndReminders 在每轮对话结束后处理标签和提醒.
+// 做的事情:
+//  1. 从 LLM 回复里解析 <tags> JSON 块.
+//  2. 把标签写入 emotion store (情绪持续段) 和 profile store (标签统计 + 非情绪维度标签).
+//  3. 从用户输入里检测提醒意图, 检测到就创建提醒候选.
+//  4. 检查画像分析阈值, 达到就后台异步分析.
+//  5. 降级模式: 所有步骤失败只打日志, 不返回 error.
+//
+// 参数:
+//   - ctx: 上下文
+//   - userInput: 用户这一轮的输入文本
+//   - assistantReply: 助手这一轮的完整回复 (包含 <tags> 块)
+func (a *Agent) processTagsAndReminders(ctx context.Context, userInput, assistantReply string) {
+	// 获取当前对话轮数: 查 dialogue_tags 表的最大 round 值 + 1, 或从 dialogues 表推断.
+	// 用 CountDialogueTagsByUser 查当前最大 round, +1 就是本轮 round.
+	round := 1
+	if a.profileStore != nil {
+		if count, err := a.profileStore.CountUserRounds(ctx, a.userID); err == nil && count > 0 {
+			round = count + 1
+		}
+	}
+
+	traceID := trace.FromContext(ctx)
+
+	// 1. 解析 <tags> JSON 块
+	tags, ok := emotion.ParseTags(assistantReply)
+	if !ok {
+		// LLM 没输出标签或格式不对, 这是正常的 (旧模型不支持), 只打 Debug 日志
+		logger.Debug("no tags block found in assistant reply",
+			zap.String("trace_id", traceID),
+			zap.Int64("user_id", a.userID),
+		)
+	} else {
+		// 2a. 写情绪持续段 + 情绪维度对话标签
+		if a.emotionStore != nil {
+			if err := a.emotionStore.RecordTags(ctx, a.userID, a.sessionID, traceID, round, tags); err != nil {
+				logger.Error("emotion record tags failed",
+					zap.String("trace_id", traceID),
+					zap.Int64("user_id", a.userID),
+					zap.Error(err),
+				)
+			}
+		}
+
+		// 2b. 写非情绪维度对话标签 + 所有维度的按天聚合统计
+		if a.profileStore != nil {
+			a.profileStore.RecordTags(ctx, a.userID, a.sessionID, traceID, round, profile.TagInput{
+				Emotion:     tags.Emotion,
+				Intensity:   tags.Intensity,
+				Urgency:     tags.Urgency,
+				Cooperation: tags.Cooperation,
+				Trigger:     tags.Trigger,
+			})
+		}
+	}
+
+	// 3. 从用户输入检测提醒意图, 检测到就创建提醒候选
+	if a.reminderStore != nil && strings.TrimSpace(userInput) != "" {
+		hints := reminder.DetectReminders(userInput)
+		for _, hint := range hints {
+			// 第一版: 提醒时间暂用 1 小时后 (时间解析后续实现)
+			// detect 只提取文本, 时间解析需要 NLP 后续做
+			// 这里先创建 pending 提醒, 用户后续可以通过 API 修改时间
+			remindAt := time.Now().Add(1 * time.Hour)
+			if _, err := a.reminderStore.CreateReminder(
+				ctx, a.userID, a.sessionID, traceID,
+				hint.Content, remindAt, data.ReminderSourceDialogue,
+			); err != nil {
+				logger.Error("create reminder from dialogue failed",
+					zap.String("trace_id", traceID),
+					zap.Int64("user_id", a.userID),
+					zap.String("content", hint.Content),
+					zap.String("when", hint.When),
+					zap.Error(err),
+				)
+			}
+		}
+	}
+
+	// 4. 检查画像分析阈值
+	if a.profileService != nil {
+		a.profileService.CheckAndAnalyze(ctx, a.userID)
+	}
 }
 
 // createMemoryCandidates 根据本轮用户原话生成待确认候选；失败只记录观测降级，不影响对话成功。
