@@ -2,14 +2,14 @@
 //
 // 做的事情:
 //  1. 加载 TOML 配置 + 初始化日志.
-//  2. 初始化 SQLite 数据库 + 执行版本化迁移.
+//  2. 初始化 PostgreSQL 数据库 + 执行版本化迁移.
 //  3. 加载数据库运行配置(解密敏感配置覆盖到 cfg).
 //  4. 启动埋点系统(telemetry).
 //  5. 用户登录 + 创建会话(identity.Manager).
 //  6. 创建 LLM Provider,Memory Store,Agent.
 //  7. 循环读取用户输入 → 流式对话 → 逐块打印 → 持久化助手回复.
 //
-// 流式对话 + SQLite 持久化(重启不丢历史).
+// 流式对话 + PostgreSQL 持久化(重启不丢历史).
 package main
 
 import (
@@ -73,13 +73,16 @@ func run() (runErr error) {
 	}
 	// 2. 根据 TOML 中的运行环境、日志等级和目录初始化日志.
 	if err := logger.Init(logger.Options{
-		Environment: cfg.App.Environment,
-		Level:       cfg.Log.Level,
-		Directory:   cfg.Log.Directory,
-		MaxSizeMB:   cfg.Log.MaxSizeMB,
-		MaxBackups:  cfg.Log.MaxBackups,
-		MaxAgeDays:  cfg.Log.MaxAgeDays,
-		Compress:    *cfg.Log.Compress,
+		Environment:  cfg.App.Environment,
+		Level:        cfg.Log.Level,
+		Directory:    cfg.Log.Directory,
+		MaxSizeMB:    cfg.Log.MaxSizeMB,
+		MaxBackups:   cfg.Log.MaxBackups,
+		MaxAgeDays:   cfg.Log.MaxAgeDays,
+		Compress:     *cfg.Log.Compress,
+		OTLPEndpoint: cfg.OTel.Endpoint,
+		OTLPInsecure: *cfg.OTel.Insecure,
+		ServiceName:  "swallow-go-chat",
 	}); err != nil {
 		return fmt.Errorf("init logger failed: %w", err)
 	}
@@ -118,16 +121,15 @@ func run() (runErr error) {
 	}()
 
 	// 3. 初始化数据库
-	// data.NewSQLite 打开 SQLite 数据库文件 + 执行版本化迁移
-	// 返回 repo 是一个 *sqlite_repo,后面所有数据库操作都通过它
-	repo, err := data.NewSQLite(cfg.Database.Path, cfg.Database.MigrationsDir)
+	// 根据配置打开 PostgreSQL，并执行版本化迁移。
+	repo, err := data.NewPostgres(cfg.Database.DSN, cfg.Database.MigrationsDir)
 	if err != nil {
 		return fmt.Errorf("init database failed: %w", err)
 	}
 
 	// settings.New 创建一个加密配置服务,负责从数据库里读取加密存储的敏感配置(比如 LLM API Key)
-	// 第二个参数传数据库文件路径,是因为加密密钥从数据库文件路径派生出来的
-	settingsService, err := settings.New(repo, cfg.Database.Path)
+	// 第二个参数是独立的本地主密钥文件路径，不能放进数据库。
+	settingsService, err := settings.New(repo, cfg.Database.MasterKeyPath)
 	if err != nil {
 		// 初始化失败了,数据库已经打开,得先关掉再返回,否则资源泄漏
 		// _ = 忽略 Close 的错误,因为现在是在处理更重要的初始化失败

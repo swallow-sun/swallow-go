@@ -135,11 +135,11 @@ func (s *TTSServer) Synthesize(ctx context.Context, req *pb.SynthesizeRequest) (
 	var ttsText string
 	var tone string
 	if req.GetTone() != "" {
-		ttsText = tts.ApplyTonePrefix(text, req.GetTone())
+		ttsText = tts.ApplyProsodyPrefix(text, req.GetTone(), req.GetSpeakingRate())
 		tone = req.GetTone()
 	} else {
 		cleanText, extractedTone := emotion.StripTagsAndTone(text)
-		ttsText = tts.ApplyTonePrefix(cleanText, extractedTone)
+		ttsText = tts.ApplyProsodyPrefix(cleanText, extractedTone, req.GetSpeakingRate())
 		tone = extractedTone
 	}
 
@@ -212,11 +212,11 @@ func (s *TTSServer) StreamSynthesize(req *pb.SynthesizeRequest, stream pb.TTS_St
 	var ttsText string
 	var tone string
 	if req.GetTone() != "" {
-		ttsText = tts.ApplyTonePrefix(text, req.GetTone())
+		ttsText = tts.ApplyProsodyPrefix(text, req.GetTone(), req.GetSpeakingRate())
 		tone = req.GetTone()
 	} else {
 		cleanText, extractedTone := emotion.StripTagsAndTone(text)
-		ttsText = tts.ApplyTonePrefix(cleanText, extractedTone)
+		ttsText = tts.ApplyProsodyPrefix(cleanText, extractedTone, req.GetSpeakingRate())
 		tone = extractedTone
 	}
 

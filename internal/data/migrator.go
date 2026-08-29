@@ -36,6 +36,11 @@ func (MigrationRecord) TableName() string {
 // 这是数据库初始化的核心流程,由 NewSQLite 调用.
 // 流程:加载磁盘迁移文件 → 建元数据表 → 逐个执行迁移.
 func migrateSQLite(ctx context.Context, db *gorm.DB, migrationsDir string) error {
+	return migrateDatabase(ctx, db, migrationsDir, nil)
+}
+
+// migrateDatabase 执行迁移；transform 用于把冻结的历史 SQL 映射到目标方言。
+func migrateDatabase(ctx context.Context, db *gorm.DB, migrationsDir string, transform func(string) string) error {
 	// 第一步:从磁盘加载所有合法的迁移文件,按版本号排序
 	migrations, err := loadMigrations(migrationsDir)
 	if err != nil {
@@ -49,6 +54,9 @@ func migrateSQLite(ctx context.Context, db *gorm.DB, migrationsDir string) error
 
 	// 第三步:按版本号从小到大逐个执行迁移
 	for _, migration := range migrations {
+		if transform != nil {
+			migration.SQL = transform(migration.SQL)
+		}
 		if err := applyMigration(ctx, db, migration); err != nil {
 			return err
 		}

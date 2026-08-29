@@ -43,7 +43,7 @@ const tagOutputInstruction = `
 你的每一轮回复都必须在正文末尾附带一个 <tags> JSON 块, 这是强制要求, 不可省略.
 
 格式:
-<tags>{"emotion":"情绪","intensity":0.0,"urgency":"low","cooperation":"cooperative","trigger":"","assistant_tone":"warm","speaking_rate":1.0}</tags>
+<tags>{"emotion":"情绪","intensity":0.0,"urgency":"low","cooperation":"cooperative","trigger":"","assistant_tone":"warm","speaking_rate":1.0,"scene":"conversation","performance":{"energy":0.4,"posture":"neutral","gaze":"user","actions":[{"type":"nod","start":0.1,"duration":0.25,"intensity":0.4}]}}</tags>
 
 字段说明:
 - emotion: 情绪标签, 取值: happy, neutral, frustrated, sad, angry, excited, anxious, calm
@@ -53,12 +53,17 @@ const tagOutputInstruction = `
 - trigger: 情绪触发原因, 没有就空串
 - assistant_tone: 你的语气, 取值: calm, warm, cheerful, serious, concerned, gentle, energetic, apologetic, sad, frustrated, angry, disappointed, coquettish, wronged, exasperated, melancholy, smug
 - speaking_rate: 语速倍率, 1.0=正常, 0.9=偏慢(讲故事/安慰), 1.1=偏快(紧急/兴奋), 范围 0.8-1.2
+- scene: idle/conversation/comfort/celebration/explanation/apology/warning/farewell
+- performance.energy: 全身动作能量 0.0-1.0
+- performance.posture: neutral/open/lean_in/reserved/confident/relaxed
+- performance.gaze: user/away/down/up/side
+- performance.actions: 选择 2～4 个有先后节奏且符合语义的动作；type 只能是 nod/shake_head/wave/bow/hand_to_chest/open_hands/point/shrug/cheer/step_in/step_back/sway/think/weight_shift/look_around/laugh/dance/surprise/listen/explain；start 与 duration 是整段台词 0.0-1.0 的归一化时间；intensity 为 0.0-1.0。不要每次只用 nod/sway，要按场景组合头、躯干、手臂和重心动作
 
 语气选择要自然贴切场景, 不要只用正面语气, 该撒娇就撒娇, 该委屈就委屈, 该生气就生气.
 
 示例:
 用户: 今天好累啊
-回复: 辛苦了, 今天忙什么呢? 要不要我帮你捋捋?<tags>{"emotion":"sad","intensity":0.3,"urgency":"low","cooperation":"cooperative","trigger":"用户说累","assistant_tone":"concerned","speaking_rate":0.9}</tags>
+回复: 辛苦了, 今天忙什么呢? 要不要我帮你捋捋?<tags>{"emotion":"sad","intensity":0.3,"urgency":"low","cooperation":"cooperative","trigger":"用户说累","assistant_tone":"concerned","speaking_rate":0.9,"scene":"comfort","performance":{"energy":0.25,"posture":"lean_in","gaze":"user","actions":[{"type":"hand_to_chest","start":0.05,"duration":0.45,"intensity":0.5},{"type":"nod","start":0.55,"duration":0.25,"intensity":0.35}]}}</tags>
 
 严格要求:
 1. <tags> 块必须以 <tags> 开头, 以 </tags> 结尾, 之间是纯 JSON.

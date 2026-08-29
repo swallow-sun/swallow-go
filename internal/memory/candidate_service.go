@@ -184,6 +184,15 @@ func (s *CandidateService) ListCandidates(ctx context.Context, userID int64, sta
 	return candidates, nil
 }
 
+// ListPendingCandidates 返回当前设备可以展示的待审核队列.
+func (s *CandidateService) ListPendingCandidates(ctx context.Context, userID int64, limit int) ([]data.MemoryCandidate, error) {
+	candidates, err := s.repo.GetPendingMemoryCandidates(ctx, userID, limit, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("list pending candidates: %w", err)
+	}
+	return candidates, nil
+}
+
 // GetCandidate 按候选 ID 查单条.
 // 供 handler 查详情用.
 func (s *CandidateService) GetCandidate(ctx context.Context, id, userID int64) (data.MemoryCandidate, error) {
@@ -205,54 +214,14 @@ func (s *CandidateService) GetCandidate(ctx context.Context, id, userID int64) (
 //
 // 方案 16.11.3 节: "memory_candidates 变为 confirmed → memories 新增 active → events 写入 memory_confirmed".
 func (s *CandidateService) ConfirmCandidate(ctx context.Context, id, userID int64) (data.Memory, error) {
-	start := time.Now()
-
-	// 确认前重新检查候选, 防止历史数据或数据库外部写入绕过新建阶段的安全检测.
-	candidate, err := s.GetCandidate(ctx, id, userID)
+	result, err := s.DecideCandidate(ctx, id, userID, CandidateDecisionConfirm, 0, "owner", "", time.Time{})
 	if err != nil {
-		return data.Memory{}, fmt.Errorf("get candidate for safety check: %w", err)
+		return data.Memory{}, err
 	}
-	if s.safetyFilterEnabled {
-		if safety := CheckMemorySafety(candidate.Content); !safety.Allowed {
-			// 敏感候选保持 pending 会被反复展示, 因此发现后立即转成 rejected.
-			if rejectErr := s.repo.RejectMemoryCandidate(ctx, id, userID); rejectErr != nil {
-				return data.Memory{}, fmt.Errorf("reject unsafe candidate: %w", rejectErr)
-			}
-			emitMemoryCandidateBlocked(ctx, userID, safety.Kind)
-			return data.Memory{}, &SafetyError{Kind: safety.Kind}
-		}
+	if result.Memory == nil {
+		return data.Memory{}, fmt.Errorf("confirmed candidate %d has no memory", id)
 	}
-
-	// 调 repo 做事务性确认: 改候选状态 + 写 memories + 写 memory_versions
-	memory, err := s.repo.ConfirmMemoryCandidate(ctx, id, userID)
-	if err != nil {
-		// 如果是 sql.ErrNoRows, 说明候选不存在
-		if errors.Is(err, sql.ErrNoRows) {
-			return data.Memory{}, fmt.Errorf("candidate not found: %w", err)
-		}
-		return data.Memory{}, fmt.Errorf("confirm candidate: %w", err)
-	}
-
-	elapsed := time.Since(start)
-
-	// 发埋点: 记录记忆确认事件
-	// 方案 16.11.3 节: "events 写入 memory_confirmed"
-	telemetry.Emit(ctx, telemetry.EventMemoryConfirmed, map[string]any{
-		"candidate_id":            id,
-		"memory_id":               memory.ID,
-		"user_id":                 userID,
-		telemetry.FieldStatus:     telemetry.StatusOK,
-		telemetry.FieldDurationMS: elapsed.Milliseconds(),
-	})
-
-	logger.Debug("memory candidate confirmed",
-		zap.Int64("candidate_id", id),
-		zap.Int64("memory_id", memory.ID),
-		zap.Int64("user_id", userID),
-		zap.Int64("duration_ms", elapsed.Milliseconds()),
-	)
-
-	return memory, nil
+	return *result.Memory, nil
 }
 
 // RejectCandidate 把候选状态从 pending 改成 rejected.
@@ -260,15 +229,129 @@ func (s *CandidateService) ConfirmCandidate(ctx context.Context, id, userID int6
 //
 // 方案 16.11.4 节: "用户拒绝候选后, 不因重新登录再次弹出同一候选".
 func (s *CandidateService) RejectCandidate(ctx context.Context, id, userID int64) error {
-	// Repository 在同一条 UPDATE 中同时校验用户归属和 pending 状态，避免先查后改的竞态窗口。
-	if err := s.repo.RejectMemoryCandidate(ctx, id, userID); err != nil {
-		return fmt.Errorf("reject candidate: %w", err)
+	_, err := s.DecideCandidate(ctx, id, userID, CandidateDecisionReject, 0, "owner", "", time.Time{})
+	return err
+}
+
+// DecideCandidate 统一处理 owner 和设备端的确认、拒绝、稍后操作.
+// 候选状态本身就是确认/拒绝的幂等键：重复同类决策返回原结果，相反决策返回冲突.
+func (s *CandidateService) DecideCandidate(
+	ctx context.Context,
+	id, userID int64,
+	decision string,
+	expectedRevision int,
+	resolvedBy, deviceID string,
+	deferredUntil time.Time,
+) (CandidateDecisionResult, error) {
+	if decision != CandidateDecisionConfirm && decision != CandidateDecisionReject && decision != CandidateDecisionDefer {
+		return CandidateDecisionResult{}, &CandidateDecisionError{Code: CandidateDecisionErrorInvalid}
+	}
+	candidate, err := s.GetCandidate(ctx, id, userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "does not belong") {
+			return CandidateDecisionResult{}, &CandidateDecisionError{Code: CandidateDecisionErrorNotFound}
+		}
+		return CandidateDecisionResult{}, fmt.Errorf("get candidate for decision: %w", err)
 	}
 
-	logger.Debug("memory candidate rejected",
-		zap.Int64("candidate_id", id),
-		zap.Int64("user_id", userID),
-	)
+	if candidate.Status != data.MemoryCandidateStatusPending {
+		return s.replayResolvedDecision(ctx, candidate, decision)
+	}
+	if expectedRevision > 0 && candidate.Revision != expectedRevision {
+		return CandidateDecisionResult{}, &CandidateDecisionError{Code: CandidateDecisionErrorConflict}
+	}
 
-	return nil
+	start := time.Now()
+	switch decision {
+	case CandidateDecisionConfirm:
+		if s.safetyFilterEnabled {
+			if safety := CheckMemorySafety(candidate.Content); !safety.Allowed {
+				if rejectErr := s.repo.RejectMemoryCandidate(ctx, id, userID, expectedRevision, "safety", deviceID); rejectErr != nil {
+					return CandidateDecisionResult{}, fmt.Errorf("reject unsafe candidate: %w", rejectErr)
+				}
+				emitMemoryCandidateBlocked(ctx, userID, safety.Kind)
+				return CandidateDecisionResult{}, &SafetyError{Kind: safety.Kind}
+			}
+		}
+		confirmed, confirmErr := s.repo.ConfirmMemoryCandidate(ctx, id, userID, expectedRevision, resolvedBy, deviceID)
+		if confirmErr != nil {
+			return s.recoverDecisionRace(ctx, id, userID, decision, confirmErr)
+		}
+		refreshed, getErr := s.GetCandidate(ctx, id, userID)
+		if getErr != nil {
+			return CandidateDecisionResult{}, fmt.Errorf("read confirmed candidate: %w", getErr)
+		}
+		elapsed := time.Since(start)
+		telemetry.Emit(ctx, telemetry.EventMemoryConfirmed, map[string]any{
+			"candidate_id":            id,
+			"memory_id":               confirmed.ID,
+			"user_id":                 userID,
+			telemetry.FieldStatus:     telemetry.StatusOK,
+			telemetry.FieldDurationMS: elapsed.Milliseconds(),
+		})
+		logger.Debug("memory candidate confirmed",
+			zap.Int64("candidate_id", id),
+			zap.Int64("memory_id", confirmed.ID),
+			zap.Int64("user_id", userID),
+			zap.Int64("duration_ms", elapsed.Milliseconds()),
+		)
+		return CandidateDecisionResult{Candidate: refreshed, Memory: &confirmed, Decision: decision}, nil
+
+	case CandidateDecisionReject:
+		if rejectErr := s.repo.RejectMemoryCandidate(ctx, id, userID, expectedRevision, resolvedBy, deviceID); rejectErr != nil {
+			return s.recoverDecisionRace(ctx, id, userID, decision, rejectErr)
+		}
+		refreshed, getErr := s.GetCandidate(ctx, id, userID)
+		if getErr != nil {
+			return CandidateDecisionResult{}, fmt.Errorf("read rejected candidate: %w", getErr)
+		}
+		logger.Debug("memory candidate rejected", zap.Int64("candidate_id", id), zap.Int64("user_id", userID))
+		return CandidateDecisionResult{Candidate: refreshed, Decision: decision}, nil
+
+	case CandidateDecisionDefer:
+		if deferredUntil.IsZero() || !deferredUntil.After(time.Now()) {
+			return CandidateDecisionResult{}, &CandidateDecisionError{Code: CandidateDecisionErrorInvalid}
+		}
+		deferred, deferErr := s.repo.DeferMemoryCandidate(ctx, id, userID, expectedRevision, deferredUntil)
+		if deferErr != nil {
+			return s.recoverDecisionRace(ctx, id, userID, decision, deferErr)
+		}
+		return CandidateDecisionResult{Candidate: deferred, Decision: decision}, nil
+	}
+	return CandidateDecisionResult{}, &CandidateDecisionError{Code: CandidateDecisionErrorInvalid}
+}
+
+func (s *CandidateService) recoverDecisionRace(
+	ctx context.Context,
+	id, userID int64,
+	decision string,
+	cause error,
+) (CandidateDecisionResult, error) {
+	candidate, err := s.GetCandidate(ctx, id, userID)
+	if err == nil && candidate.Status != data.MemoryCandidateStatusPending {
+		return s.replayResolvedDecision(ctx, candidate, decision)
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return CandidateDecisionResult{}, fmt.Errorf("recover candidate decision: %w", err)
+	}
+	logger.Debug("memory candidate decision conflict", zap.Int64("candidate_id", id), zap.Error(cause))
+	return CandidateDecisionResult{}, &CandidateDecisionError{Code: CandidateDecisionErrorConflict}
+}
+
+func (s *CandidateService) replayResolvedDecision(
+	ctx context.Context,
+	candidate data.MemoryCandidate,
+	decision string,
+) (CandidateDecisionResult, error) {
+	if candidate.Status == data.MemoryCandidateStatusConfirmed && decision == CandidateDecisionConfirm {
+		confirmed, err := s.repo.GetMemoryByCandidateID(ctx, candidate.ID)
+		if err != nil {
+			return CandidateDecisionResult{}, fmt.Errorf("read confirmed memory for replay: %w", err)
+		}
+		return CandidateDecisionResult{Candidate: candidate, Memory: &confirmed, Decision: decision, Replayed: true}, nil
+	}
+	if candidate.Status == data.MemoryCandidateStatusRejected && decision == CandidateDecisionReject {
+		return CandidateDecisionResult{Candidate: candidate, Decision: decision, Replayed: true}, nil
+	}
+	return CandidateDecisionResult{}, &CandidateDecisionError{Code: CandidateDecisionErrorConflict}
 }

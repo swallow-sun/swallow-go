@@ -21,7 +21,7 @@ func (ormDevice) TableName() string { return "devices" }
 
 // CreateDevice 创建一台设备并返回数据库中的完整记录.
 // 日志只记录公开标识,不记录令牌摘要.
-func (r *sqliteRepo) CreateDevice(ctx context.Context, device Device) (Device, error) {
+func (r *gormRepo) CreateDevice(ctx context.Context, device Device) (Device, error) {
 	model := deviceToORM(device)
 	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
 		if isUniqueConstraintError(err) {
@@ -39,7 +39,7 @@ func (r *sqliteRepo) CreateDevice(ctx context.Context, device Device) (Device, e
 
 // GetDevice 按设备 UUID 查询完整认证记录.
 // 返回值包含 TokenHash,只能在服务端认证链路内部使用,不得直接序列化给客户端.
-func (r *sqliteRepo) GetDevice(ctx context.Context, id string) (Device, error) {
+func (r *gormRepo) GetDevice(ctx context.Context, id string) (Device, error) {
 	var model ormDevice
 	if err := r.db.WithContext(ctx).Select(deviceColumns).First(&model, "id = ?", id).Error; err != nil {
 		return Device{}, fmt.Errorf("get device: %w", repositoryError(err))
@@ -49,7 +49,7 @@ func (r *sqliteRepo) GetDevice(ctx context.Context, id string) (Device, error) {
 
 // UpdateDeviceLastSeen 更新设备最近认证成功时间.
 // WHERE 同时限制 active 状态,避免设备在认证查询后被吊销却仍被刷新在线时间.
-func (r *sqliteRepo) UpdateDeviceLastSeen(ctx context.Context, id string, at time.Time) error {
+func (r *gormRepo) UpdateDeviceLastSeen(ctx context.Context, id string, at time.Time) error {
 	result := r.db.WithContext(ctx).Model(&ormDevice{}).
 		Where("id = ? AND status = ?", id, DeviceStatusActive).
 		Update("last_seen_at", at)

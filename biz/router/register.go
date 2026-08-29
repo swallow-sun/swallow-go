@@ -87,6 +87,9 @@ func Register(r *server.Hertz, deps *handler.Deps) {
 		// 设备同步 API:设备令牌认证后批量上报 sync_outbox 里的条目.
 		v1.POST("/device/sync", deps.DeviceSync)
 		v1.GET("/device/memories/sync", deps.DeviceMemorySync)
+		// 设备候选记忆审核：拉取只返回设备所属用户的可展示候选，决策接口支持幂等重试.
+		v1.GET("/device/memory-candidates/pending", deps.DeviceListMemoryCandidates)
+		v1.POST("/device/memory-candidates/:id/decision", deps.DeviceDecideMemoryCandidate)
 
 		// 用户画像 API:查画像、查对话标签、查标签统计.
 		// 方案 16.12.6 节.

@@ -27,6 +27,9 @@ message SynthesizeRequest {
   // 设备 ID, 从 gRPC metadata 的 Authorization 头解析, 用于日志.
   // 不需要客户端显式传, 这里保留用于服务端日志关联.
   string device_id = 3;
+
+  // LLM 规划的语速倍率，服务端转换为供应商原生韵律指令；0 表示默认 1.0。
+  double speaking_rate = 4;
 }
 
 // 非流式合成响应.

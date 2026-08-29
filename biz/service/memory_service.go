@@ -24,6 +24,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/swallow-sun/swallow-go/internal/data"
 	"github.com/swallow-sun/swallow-go/internal/memory"
@@ -111,6 +112,45 @@ func (s *MemoryService) ListCandidates(
 	}
 
 	return ListCandidatesResult{Items: candidates}, nil
+}
+
+// ListPendingCandidates 返回当前设备可展示的候选，自动排除仍在“稍后”期限内的记录.
+func (s *MemoryService) ListPendingCandidates(
+	ctx context.Context,
+	userID int64,
+	limit int,
+) (ListCandidatesResult, error) {
+	candidates, err := s.candidate.ListPendingCandidates(ctx, userID, limit)
+	if err != nil {
+		return ListCandidatesResult{}, fmt.Errorf("list pending candidates: %w", err)
+	}
+	if candidates == nil {
+		candidates = []data.MemoryCandidate{}
+	}
+	return ListCandidatesResult{Items: candidates}, nil
+}
+
+// DecideCandidate 以设备身份确认、拒绝或暂缓候选.
+func (s *MemoryService) DecideCandidate(
+	ctx context.Context,
+	candidateID, userID int64,
+	decision string,
+	expectedRevision int,
+	deviceID string,
+	deferredUntil time.Time,
+) (CandidateDecisionResult, error) {
+	result, err := s.candidate.DecideCandidate(
+		ctx, candidateID, userID, decision, expectedRevision, "device", deviceID, deferredUntil,
+	)
+	if err != nil {
+		return CandidateDecisionResult{}, fmt.Errorf("decide candidate: %w", err)
+	}
+	return CandidateDecisionResult{
+		Candidate: result.Candidate,
+		Memory:    result.Memory,
+		Decision:  result.Decision,
+		Replayed:  result.Replayed,
+	}, nil
 }
 
 // ConfirmCandidate 确认候选, 写入正式记忆.

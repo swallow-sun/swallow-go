@@ -18,7 +18,7 @@ import (
 // InsertDeviceSyncLog 原子插入一条设备同步日志.
 // 用 (device_id, item_id) 唯一索引做幂等: 重复条目不会插入.
 // 返回 created=true 表示这是首次接收, created=false 表示已存在.
-func (r *sqliteRepo) InsertDeviceSyncLog(ctx context.Context, log DeviceSyncLog) (bool, error) {
+func (r *gormRepo) InsertDeviceSyncLog(ctx context.Context, log DeviceSyncLog) (bool, error) {
 	model := ormDeviceSyncLog{
 		DeviceID:   log.DeviceID,
 		UserID:     log.UserID,
@@ -63,7 +63,7 @@ func (r *sqliteRepo) InsertDeviceSyncLog(ctx context.Context, log DeviceSyncLog)
 
 // DeleteDeviceSyncLog 删除尚未成功处理的同步占位记录。
 // 业务处理失败时必须删除它，否则设备重试会被误判为“已经处理”。
-func (r *sqliteRepo) DeleteDeviceSyncLog(ctx context.Context, deviceID, itemID string) error {
+func (r *gormRepo) DeleteDeviceSyncLog(ctx context.Context, deviceID, itemID string) error {
 	return r.db.WithContext(ctx).
 		Where("device_id = ? AND item_id = ?", deviceID, itemID).
 		Delete(&ormDeviceSyncLog{}).Error

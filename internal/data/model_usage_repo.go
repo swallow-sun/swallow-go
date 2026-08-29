@@ -28,7 +28,7 @@ func (ormModelUsage) TableName() string { return "model_usages" }
 //
 // 参数 ctx 控制超时,usage 是模型调用的完整用量记录.
 // 写入失败返回 error,调用方应记 ERROR 和待补偿标记,不能静默丢失成本数据.
-func (r *sqliteRepo) InsertModelUsage(ctx context.Context, usage ModelUsage) error {
+func (r *gormRepo) InsertModelUsage(ctx context.Context, usage ModelUsage) error {
 	// 业务对象转 ORM 模型
 	model := modelUsageToORM(usage)
 

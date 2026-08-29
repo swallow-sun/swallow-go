@@ -2,7 +2,7 @@
 //
 // 做的事情:
 //  1. 加载 TOML 配置 + 初始化日志.
-//  2. 初始化 SQLite 数据库 + 执行版本化迁移.
+//  2. 初始化 PostgreSQL 数据库 + 执行版本化迁移.
 //  3. 加载数据库运行配置(解密敏感配置覆盖到 cfg).
 //  4. 启动埋点系统(telemetry).
 //  5. 组装业务依赖(NewDeps:创建三个 Service).
@@ -30,8 +30,6 @@ import (
 	"github.com/swallow-sun/swallow-go/internal/settings"
 	"github.com/swallow-sun/swallow-go/internal/telemetry"
 	"github.com/swallow-sun/swallow-go/internal/trace"
-	"github.com/swallow-sun/swallow-go/internal/ttspython"
-
 	"google.golang.org/grpc"
 )
 
@@ -63,13 +61,16 @@ func run() (runErr error) {
 	}
 	// 2. 根据 TOML 中的运行环境、日志等级和目录初始化日志.
 	if err := logger.Init(logger.Options{
-		Environment: cfg.App.Environment,
-		Level:       cfg.Log.Level,
-		Directory:   cfg.Log.Directory,
-		MaxSizeMB:   cfg.Log.MaxSizeMB,
-		MaxBackups:  cfg.Log.MaxBackups,
-		MaxAgeDays:  cfg.Log.MaxAgeDays,
-		Compress:    *cfg.Log.Compress,
+		Environment:  cfg.App.Environment,
+		Level:        cfg.Log.Level,
+		Directory:    cfg.Log.Directory,
+		MaxSizeMB:    cfg.Log.MaxSizeMB,
+		MaxBackups:   cfg.Log.MaxBackups,
+		MaxAgeDays:   cfg.Log.MaxAgeDays,
+		Compress:     *cfg.Log.Compress,
+		OTLPEndpoint: cfg.OTel.Endpoint,
+		OTLPInsecure: *cfg.OTel.Insecure,
+		ServiceName:  "swallow-go-server",
 	}); err != nil {
 		return fmt.Errorf("init logger failed: %w", err)
 	}
@@ -108,16 +109,15 @@ func run() (runErr error) {
 	}()
 
 	// 3. 初始化数据库
-	// data.NewSQLite 打开 SQLite 数据库文件 + 执行版本化迁移
-	// 返回 repo 是一个 *sqlite_repo,后面所有数据库操作都通过它
-	repo, err := data.NewSQLite(cfg.Database.Path, cfg.Database.MigrationsDir)
+	// 根据配置打开 PostgreSQL，并执行版本化迁移。
+	repo, err := data.NewPostgres(cfg.Database.DSN, cfg.Database.MigrationsDir)
 	if err != nil {
 		return fmt.Errorf("init database failed: %w", err)
 	}
 
 	// settings.New 创建一个加密配置服务,负责从数据库里读取加密存储的敏感配置(比如 LLM API Key)
-	// 第二个参数传数据库文件路径,是因为加密密钥从数据库文件路径派生出来的
-	settingsService, err := settings.New(repo, cfg.Database.Path)
+	// 第二个参数是独立的本地主密钥文件路径，不能放进数据库。
+	settingsService, err := settings.New(repo, cfg.Database.MasterKeyPath)
 	if err != nil {
 		// 初始化失败了,数据库已经打开,得先关掉再返回,否则资源泄漏
 		// _ = 忽略 Close 的错误,因为现在是在处理更重要的初始化失败
@@ -208,35 +208,6 @@ func run() (runErr error) {
 	metricsShutdown := metrics.Start(cfg.Metrics.MetricsPort)
 	if metricsShutdown != nil {
 		defer metricsShutdown()
-	}
-
-	// 启动 tts_server.py 子进程 (provider = "cosyvoice" 时生效).
-	// Python 解释器路径和脚本路径写死在 ttspython 包里, 不走配置.
-	// 子进程生命周期绑定到 ttsSupCtx, 程序退出时 cancel 触发 kill.
-	if cfg.TTS.Provider == "cosyvoice" {
-		port := cfg.TTS.CosyVoicePort
-		if port == 0 {
-			port = 9880
-		}
-		ttsSupCtx, ttsSupCancel := context.WithCancel(context.Background())
-		ttsSup, ttsErr := ttspython.Start(ttsSupCtx,
-			cfg.TTS.CosyVoiceModelDir,
-			cfg.TTS.CosyVoiceRefWav,
-			cfg.TTS.CosyVoiceRefText,
-			port,
-		)
-		if ttsErr != nil {
-			ttsSupCancel()
-			return fmt.Errorf("start tts_server.py: %w", ttsErr)
-		}
-		// 程序退出时先 kill Python 子进程.
-		defer func() {
-			logger.Info("正在停止 tts_server.py 子进程...")
-			ttsSupCancel()
-			// 给子进程 5 秒优雅退出.
-			<-time.After(5 * time.Second)
-		}()
-		_ = ttsSup // 不需要在后续代码中直接引用, 通过 HTTP 调用
 	}
 
 	// Hertz 框架自带一套日志系统(hlog),这里把它转发到项目唯一的全局 logger

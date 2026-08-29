@@ -24,6 +24,7 @@ import (
 	"github.com/swallow-sun/swallow-go/internal/data"
 	"github.com/swallow-sun/swallow-go/internal/device"
 	"github.com/swallow-sun/swallow-go/internal/emotion"
+	"github.com/swallow-sun/swallow-go/internal/memory"
 	"github.com/swallow-sun/swallow-go/internal/provider/asr"
 	"github.com/swallow-sun/swallow-go/internal/provider/tts"
 	"github.com/swallow-sun/swallow-go/internal/trace"
@@ -45,6 +46,58 @@ type deviceMemoryTombstoneItem struct {
 	MemoryID    int64 `json:"memory_id"`
 	SyncVersion int   `json:"sync_version"`
 	DeletedAt   int64 `json:"deleted_at"`
+}
+
+const (
+	defaultDeviceCandidateLimit = 20
+	maxDeviceCandidateLimit     = 50
+	minCandidateDeferSeconds    = 60
+	maxCandidateDeferSeconds    = 7 * 24 * 60 * 60
+)
+
+// deviceMemoryCandidateItem 是设备可见的候选字段；不返回 user_id，用户归属只由
+// 已认证设备决定，也不返回内部 ORM 字段.
+type deviceMemoryCandidateItem struct {
+	ID            int64  `json:"id"`
+	Content       string `json:"content"`
+	MemoryType    string `json:"memory_type"`
+	Reason        string `json:"reason"`
+	UsageHint     string `json:"usage_hint"`
+	Status        string `json:"status"`
+	Revision      int    `json:"revision"`
+	CreatedAt     int64  `json:"created_at"`
+	DeferredUntil int64  `json:"deferred_until,omitempty"`
+}
+
+type deviceMemoryDecisionReq struct {
+	Decision         string `json:"decision"`
+	ExpectedRevision int    `json:"expected_revision"`
+	DeferSeconds     int    `json:"defer_seconds,omitempty"`
+}
+
+type deviceMemoryDecisionResp struct {
+	Candidate deviceMemoryCandidateItem `json:"candidate"`
+	MemoryID  int64                     `json:"memory_id,omitempty"`
+	Decision  string                    `json:"decision"`
+	Replayed  bool                      `json:"replayed"`
+}
+
+func newDeviceMemoryCandidateItem(candidate data.MemoryCandidate) deviceMemoryCandidateItem {
+	deferredUntil := int64(0)
+	if !candidate.DeferredUntil.IsZero() {
+		deferredUntil = candidate.DeferredUntil.UnixMilli()
+	}
+	return deviceMemoryCandidateItem{
+		ID:            candidate.ID,
+		Content:       candidate.Content,
+		MemoryType:    candidate.MemoryType,
+		Reason:        candidate.Reason,
+		UsageHint:     candidate.UsageHint,
+		Status:        candidate.Status,
+		Revision:      candidate.Revision,
+		CreatedAt:     candidate.CreatedAt.UnixMilli(),
+		DeferredUntil: deferredUntil,
+	}
 }
 
 // DeviceMemorySync GET /api/v1/device/memories/sync?since_version=0&limit=100.
@@ -83,6 +136,98 @@ func (d *Deps) DeviceMemorySync(ctx context.Context, c *app.RequestContext) {
 		tombstones = append(tombstones, deviceMemoryTombstoneItem{MemoryID: item.MemoryID, SyncVersion: item.SyncVersion, DeletedAt: item.DeletedAt.UnixMilli()})
 	}
 	c.JSON(consts.StatusOK, map[string]any{"memories": memories, "tombstones": tombstones, "next_version": result.NextVersion, "has_more": result.HasMore})
+}
+
+// DeviceListMemoryCandidates GET /api/v1/device/memory-candidates/pending?limit=20.
+// 候选只能按设备令牌所属用户读取，仍在“稍后”期限内的记录由仓库自动排除.
+func (d *Deps) DeviceListMemoryCandidates(ctx context.Context, c *app.RequestContext) {
+	ctx, _ = trace.EnsureFromHeader(ctx, string(c.GetHeader("X-Trace-Id")))
+	registered, ok := d.authenticateDevice(ctx, c)
+	if !ok {
+		return
+	}
+	limit := defaultDeviceCandidateLimit
+	if raw := string(c.Query("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > maxDeviceCandidateLimit {
+			writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_limit", "limit must be between 1 and 50", ""))
+			return
+		}
+		limit = parsed
+	}
+	result, err := d.memory.ListPendingCandidates(ctx, registered.UserID, limit)
+	if err != nil {
+		logger.Error("设备候选记忆拉取失败", zap.String("device_id", registered.ID), zap.Error(err))
+		writeErrorFromCtx(ctx, c, apperror.Internal(""))
+		return
+	}
+	items := make([]deviceMemoryCandidateItem, 0, len(result.Items))
+	for _, candidate := range result.Items {
+		items = append(items, newDeviceMemoryCandidateItem(candidate))
+	}
+	c.JSON(consts.StatusOK, map[string]any{"items": items})
+}
+
+// DeviceDecideMemoryCandidate POST /api/v1/device/memory-candidates/:id/decision.
+// confirm/reject 是按候选最终状态幂等的；defer 使用 revision 防止覆盖另一台设备的更新.
+func (d *Deps) DeviceDecideMemoryCandidate(ctx context.Context, c *app.RequestContext) {
+	ctx, _ = trace.EnsureFromHeader(ctx, string(c.GetHeader("X-Trace-Id")))
+	registered, ok := d.authenticateDevice(ctx, c)
+	if !ok {
+		return
+	}
+	candidateID, validID := parsePathID(c, "id")
+	if !validID {
+		writeErrorFromCtx(ctx, c, apperror.BadRequest("invalid_candidate_id", "candidate id must be a positive integer", ""))
+		return
+	}
+	var req deviceMemoryDecisionReq
+	if err := c.BindAndValidate(&req); err != nil || req.ExpectedRevision < 1 {
+		writeErrorFromCtx(ctx, c, apperror.BadRequest(memory.CandidateDecisionErrorInvalid, "invalid memory candidate decision", ""))
+		return
+	}
+
+	deferredUntil := time.Time{}
+	if req.Decision == memory.CandidateDecisionDefer {
+		if req.DeferSeconds < minCandidateDeferSeconds || req.DeferSeconds > maxCandidateDeferSeconds {
+			writeErrorFromCtx(ctx, c, apperror.BadRequest(memory.CandidateDecisionErrorInvalid, "defer_seconds must be between 60 and 604800", ""))
+			return
+		}
+		deferredUntil = time.Now().Add(time.Duration(req.DeferSeconds) * time.Second)
+	}
+
+	result, err := d.memory.DecideCandidate(
+		ctx, candidateID, registered.UserID, req.Decision, req.ExpectedRevision, registered.ID, deferredUntil,
+	)
+	if err != nil {
+		var decisionErr *memory.CandidateDecisionError
+		if errors.As(err, &decisionErr) {
+			switch decisionErr.Code {
+			case memory.CandidateDecisionErrorNotFound:
+				writeErrorFromCtx(ctx, c, apperror.New(decisionErr.Code, "memory candidate not found", consts.StatusNotFound, false, ""))
+			case memory.CandidateDecisionErrorConflict:
+				writeErrorFromCtx(ctx, c, apperror.New(decisionErr.Code, "memory candidate was changed by another client", consts.StatusConflict, false, ""))
+			default:
+				writeErrorFromCtx(ctx, c, apperror.BadRequest(decisionErr.Code, "invalid memory candidate decision", ""))
+			}
+			return
+		}
+		if writeMemorySafetyError(ctx, c, err) {
+			return
+		}
+		logger.Error("设备候选记忆审核失败", zap.String("device_id", registered.ID), zap.Int64("candidate_id", candidateID), zap.Error(err))
+		writeErrorFromCtx(ctx, c, apperror.Internal(""))
+		return
+	}
+	response := deviceMemoryDecisionResp{
+		Candidate: newDeviceMemoryCandidateItem(result.Candidate),
+		Decision:  result.Decision,
+		Replayed:  result.Replayed,
+	}
+	if result.Memory != nil {
+		response.MemoryID = result.Memory.ID
+	}
+	c.JSON(consts.StatusOK, response)
 }
 
 // RegisterDevice POST /api/v1/devices/register.
@@ -522,11 +667,11 @@ func (d *Deps) DeviceTTSStream(ctx context.Context, c *app.RequestContext) {
 	var ttsText string
 	var tone string
 	if req.Tone != "" {
-		ttsText = tts.ApplyTonePrefix(req.Text, req.Tone)
+		ttsText = tts.ApplyProsodyPrefix(req.Text, req.Tone, req.SpeakingRate)
 		tone = req.Tone
 	} else {
 		cleanText, extractedTone := emotion.StripTagsAndTone(req.Text)
-		ttsText = tts.ApplyTonePrefix(cleanText, extractedTone)
+		ttsText = tts.ApplyProsodyPrefix(cleanText, extractedTone, req.SpeakingRate)
 		tone = extractedTone
 	}
 

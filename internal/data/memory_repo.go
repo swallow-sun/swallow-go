@@ -40,12 +40,12 @@ func (ormMemoryTombstone) TableName() string { return "memory_tombstones" }
 // nextMemorySyncVersion 在当前事务中为用户分配一个全局单调递增的同步版本。
 func nextMemorySyncVersion(tx *gorm.DB, userID int64) (int, error) {
 	if err := tx.Exec(
-		`INSERT INTO memory_sync_cursors(user_id, next_version)
+		`INSERT OR IGNORE INTO memory_sync_cursors(user_id, next_version)
 		 SELECT ?, MAX(version) + 1 FROM (
 		   SELECT COALESCE(MAX(sync_version), 0) AS version FROM memories WHERE user_id = ?
 		   UNION ALL
 		   SELECT COALESCE(MAX(sync_version), 0) AS version FROM memory_tombstones WHERE user_id = ?
-		 ) ON CONFLICT(user_id) DO NOTHING`,
+		 )`,
 		userID, userID, userID,
 	).Error; err != nil {
 		return 0, fmt.Errorf("ensure memory sync cursor: %w", err)
@@ -60,7 +60,7 @@ func nextMemorySyncVersion(tx *gorm.DB, userID int64) (int, error) {
 	return version, nil
 }
 
-func (r *sqliteRepo) InsertMemory(ctx context.Context, m Memory) (Memory, error) {
+func (r *gormRepo) InsertMemory(ctx context.Context, m Memory) (Memory, error) {
 	// 业务对象转 ORM 模型
 	model := memoryToORM(m)
 
@@ -87,7 +87,7 @@ func (r *sqliteRepo) InsertMemory(ctx context.Context, m Memory) (Memory, error)
 // GetMemory 按 ID 查一条记忆.
 // 查不到返回 sql.ErrNoRows.
 // 不论 active 还是 deleted 都能查到(给编辑/删除用).
-func (r *sqliteRepo) GetMemory(ctx context.Context, id int64) (Memory, error) {
+func (r *gormRepo) GetMemory(ctx context.Context, id int64) (Memory, error) {
 	// .Select(memoryColumns) 只查需要的列, 不用 SELECT *
 	// .First(&model, id) 按主键查一条
 	var model ormMemory
@@ -97,9 +97,22 @@ func (r *sqliteRepo) GetMemory(ctx context.Context, id int64) (Memory, error) {
 	return memoryFromORM(model), nil
 }
 
+// GetMemoryByCandidateID 返回候选已经生成的正式记忆.
+// candidate_id 有唯一索引，因此最多返回一条；确认接口用它把重复请求重放为
+// 原来的成功结果，而不是把网络重试误报成服务器错误.
+func (r *gormRepo) GetMemoryByCandidateID(ctx context.Context, candidateID int64) (Memory, error) {
+	var model ormMemory
+	if err := r.db.WithContext(ctx).Select(memoryColumns).
+		Where("candidate_id = ?", candidateID).
+		First(&model).Error; err != nil {
+		return Memory{}, fmt.Errorf("get memory by candidate %d: %w", candidateID, repositoryError(err))
+	}
+	return memoryFromORM(model), nil
+}
+
 // GetMemories 按用户 ID 查正式记忆列表, 只返回 status=active 的记录.
 // 按更新时间倒序返回(最近编辑的在前).
-func (r *sqliteRepo) GetMemories(ctx context.Context, userID int64) ([]Memory, error) {
+func (r *gormRepo) GetMemories(ctx context.Context, userID int64) ([]Memory, error) {
 	// .Select(memoryColumns) 只查需要的列
 	// .Where("user_id = ? AND status = ?", userID, MemoryStatusActive) 只查 active 记忆
 	// .Order("updated_at DESC") 按更新时间倒序
@@ -124,7 +137,7 @@ func (r *sqliteRepo) GetMemories(ctx context.Context, userID int64) ([]Memory, e
 //
 // 搜索逻辑: keywords 字段或 content 字段中包含搜索词的记录都会返回.
 // limit 限制返回条数, 0 或负数用默认值 20.
-func (r *sqliteRepo) SearchMemories(ctx context.Context, userID int64, keywords string, limit int) ([]Memory, error) {
+func (r *gormRepo) SearchMemories(ctx context.Context, userID int64, keywords string, limit int) ([]Memory, error) {
 	// limit 默认值 20
 	if limit <= 0 {
 		limit = 20
@@ -159,7 +172,7 @@ func (r *sqliteRepo) SearchMemories(ctx context.Context, userID int64, keywords 
 }
 
 // GetMemorySyncChanges 以合并后的版本序列分页，避免分别 LIMIT 记忆和墓碑造成跳版。
-func (r *sqliteRepo) GetMemorySyncChanges(ctx context.Context, userID int64, sinceVersion, limit int) (MemorySyncChanges, error) {
+func (r *gormRepo) GetMemorySyncChanges(ctx context.Context, userID int64, sinceVersion, limit int) (MemorySyncChanges, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
@@ -211,7 +224,7 @@ func (r *sqliteRepo) GetMemorySyncChanges(ctx context.Context, userID int64, sin
 //
 // 方案 16.11.4 节: 记忆中的命令性文本不能修改系统提示, 权限和工具调用规则.
 // 这里的编辑只改 content 和 keywords, 不改 memory_type 和 user_id.
-func (r *sqliteRepo) UpdateMemory(ctx context.Context, id int64, userID int64, content, keywords string) (Memory, error) {
+func (r *gormRepo) UpdateMemory(ctx context.Context, id int64, userID int64, content, keywords string) (Memory, error) {
 	var updatedMemory Memory
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -284,7 +297,7 @@ func (r *sqliteRepo) UpdateMemory(ctx context.Context, id int64, userID int64, c
 //
 // 方案 16.11.4 节: "删除记忆后普通查询和缓存都不再返回它".
 // tombstone 的作用: 防止已删除的记忆通过同步机制重新出现.
-func (r *sqliteRepo) DeleteMemory(ctx context.Context, id int64, userID int64) error {
+func (r *gormRepo) DeleteMemory(ctx context.Context, id int64, userID int64) error {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 1. 查出记忆, 确认它存在且属于这个用户
 		var model ormMemory

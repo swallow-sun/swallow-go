@@ -53,6 +53,8 @@ func Load() (*Config, error) {
 	}
 	// 旧配置没有 [log] 时补默认值，保证升级后仍能直接启动。
 	cfg.applyLogDefaults()
+	cfg.applyOTelDefaults()
+	cfg.applyDatabaseDefaults()
 	// 旧配置没有 [memory] 时默认开启敏感信息过滤,防止升级后意外关闭安全边界.
 	cfg.applyMemoryDefaults()
 	// 阶段 4.5: 旧配置没有 [profile]/[emotion]/[reminder] 时补默认值.
@@ -60,7 +62,7 @@ func Load() (*Config, error) {
 	cfg.applyEmotionDefaults()
 	cfg.applyReminderDefaults()
 	cfg.applyTTSPlaybackDefaults()
-	// 加载完后校验启动配置(环境,端口,数据库路径等),不合法就报错
+	// 加载完后校验启动配置(环境、端口、数据库连接等),不合法就报错
 	if err := cfg.ValidateBootstrap(); err != nil {
 		return nil, err
 	}
@@ -222,7 +224,25 @@ func (cfg *Config) applyLogDefaults() {
 	}
 }
 
-// Validate 校验服务端口,LLM 地址,模型名称和数据库路径.
+// applyOTelDefaults 为生产日志上报补齐本地 Alloy 的默认 OTLP/gRPC 地址。
+// 是否真正启用仍只由 app.environment == "production" 决定。
+func (cfg *Config) applyOTelDefaults() {
+	if strings.TrimSpace(cfg.OTel.Endpoint) == "" {
+		cfg.OTel.Endpoint = "localhost:4317"
+	}
+	if cfg.OTel.Insecure == nil {
+		insecure := true
+		cfg.OTel.Insecure = &insecure
+	}
+}
+
+func (cfg *Config) applyDatabaseDefaults() {
+	if strings.TrimSpace(cfg.Database.MasterKeyPath) == "" {
+		cfg.Database.MasterKeyPath = "data/swallow.master.key"
+	}
+}
+
+// Validate 校验服务端口、LLM 配置和 PostgreSQL 连接配置.
 // API Key 允许为空,由确实需要调用 LLM 的入口决定是否强制要求.
 // 流程:先校验启动配置(数据库前必须可用的)→ 再校验运行配置(调 LLM 的).
 func (cfg Config) Validate() error {
@@ -264,14 +284,15 @@ func (cfg Config) ValidateBootstrap() error {
 	if cfg.Log.MaxAgeDays < 0 {
 		return fmt.Errorf("log.max_age_days must not be negative")
 	}
+	if cfg.App.Environment == "production" && strings.TrimSpace(cfg.OTel.Endpoint) == "" {
+		return fmt.Errorf("otel.endpoint must not be empty in production")
+	}
 	// 端口号必须在 1-65535 范围内,0 和负数,超过 65535 都不行
 	if cfg.Server.Port < 1 || cfg.Server.Port > 65535 {
 		return fmt.Errorf("server.port must be between 1 and 65535")
 	}
-	// 数据库路径不能为空,空了就不知道往哪存数据
-	// strings.TrimSpace 去掉首尾空格后判断是不是空字符串
-	if strings.TrimSpace(cfg.Database.Path) == "" {
-		return fmt.Errorf("database.path must not be empty")
+	if strings.TrimSpace(cfg.Database.DSN) == "" {
+		return fmt.Errorf("database.dsn must not be empty")
 	}
 	// 迁移目录不能为空,空了迁移器就找不到 SQL 文件
 	if strings.TrimSpace(cfg.Database.MigrationsDir) == "" {

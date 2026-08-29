@@ -18,10 +18,7 @@
 //   - 硅基流动走普通 HTTP POST, 国内直连, 稳定, 需要 api_key.
 //   - 硅基流动直接输出完整 WAV 文件 (带文件头), 不需要像 edge-tts 那样手动拼 WAV 头.
 //
-// 和 cosyvoice 的区别:
-//   - cosyvoice: 本地 tts_server.py (GPU 推理), Go 调 localhost.
-//   - siliconflow: 云端 API, Go 调 api.siliconflow.cn, 国内直连.
-//   - 两者都实现 StreamProvider 接口, DeviceTTSStream 自动走流式路径.
+// 合成完全在云端完成，不占用本机推理算力；该实现支持流式返回。
 package tts
 
 import (
@@ -42,6 +39,13 @@ import (
 	"github.com/swallow-sun/swallow-go/pkg/logger"
 	"go.uber.org/zap"
 )
+
+func truncStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
 
 // stripTonePrefix 去除 ApplyTonePrefix 拼装的情感指令前缀, 只保留纯文本.
 // ApplyTonePrefix 输出格式: "用温和的语气说 <|endofprompt|>实际文本".

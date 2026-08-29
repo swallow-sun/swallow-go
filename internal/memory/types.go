@@ -39,6 +39,20 @@ const (
 	sensitiveNationalIDPattern = `(?i)(^|[^0-9])[1-9][0-9]{5}(18|19|20)[0-9]{2}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])[0-9]{3}[0-9x]([^0-9x]|$)`
 	// sensitiveCredentialURLPattern 匹配 scheme://user:password@host 形式的带凭据 URL.
 	sensitiveCredentialURLPattern = `(?i)[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@[^\s]+`
+
+	// CandidateDecisionConfirm 表示用户确认保存候选.
+	CandidateDecisionConfirm = "confirm"
+	// CandidateDecisionReject 表示用户明确拒绝候选.
+	CandidateDecisionReject = "reject"
+	// CandidateDecisionDefer 表示暂不处理，稍后再次展示.
+	CandidateDecisionDefer = "defer"
+
+	// CandidateDecisionErrorNotFound 对外统一隐藏候选不存在和跨用户访问.
+	CandidateDecisionErrorNotFound = "memory_candidate_not_found"
+	// CandidateDecisionErrorConflict 表示候选已被另一端处理或客户端 revision 过期.
+	CandidateDecisionErrorConflict = "memory_candidate_conflict"
+	// CandidateDecisionErrorInvalid 表示决策参数不合法.
+	CandidateDecisionErrorInvalid = "invalid_memory_decision"
 )
 
 // Store 管理当前会话对话历史的存取.
@@ -85,6 +99,23 @@ type safetyCheck struct {
 // Kind 只描述敏感信息类别, 不保存或返回命中的原文.
 type SafetyError struct {
 	Kind string
+}
+
+// CandidateDecisionError 是设备候选审核的稳定领域错误.
+// Handler 只依据 Code 映射 HTTP 状态，不需要解析仓库错误字符串.
+type CandidateDecisionError struct {
+	Code string
+}
+
+func (e *CandidateDecisionError) Error() string { return e.Code }
+
+// CandidateDecisionResult 是一次候选审核的最终状态.
+// Memory 仅在 confirm 时存在；Replayed 表示请求命中了此前已完成的同类决策.
+type CandidateDecisionResult struct {
+	Candidate data.MemoryCandidate
+	Memory    *data.Memory
+	Decision  string
+	Replayed  bool
 }
 
 type CandidateService struct {

@@ -45,4 +45,24 @@ type ParsedTags struct {
 	// 1.0 = 正常, 0.9 = 偏慢, 1.1 = 偏快. 范围 0.8-1.2.
 	// C++ 播放端用这个值调整 waveOut 采样率实现变速.
 	SpeakingRate float64 `json:"speaking_rate"`
+	// Scene 与 Performance 描述这一轮可见的表演。字段只接受受限词表，
+	// 服务端会校验并钳制，客户端绝不执行模型生成的任意代码。
+	Scene       string          `json:"scene"`
+	Performance PerformancePlan `json:"performance"`
+}
+
+// PerformancePlan 是与一轮语音同步的低成本全身表演参数。
+// action 的 start/duration 使用 0..1 的归一化语音时间，避免依赖 TTS 事先返回时长。
+type PerformancePlan struct {
+	Energy  float64             `json:"energy"`
+	Posture string              `json:"posture"`
+	Gaze    string              `json:"gaze"`
+	Actions []PerformanceAction `json:"actions"`
+}
+
+type PerformanceAction struct {
+	Type      string  `json:"type"`
+	Start     float64 `json:"start"`
+	Duration  float64 `json:"duration"`
+	Intensity float64 `json:"intensity"`
 }

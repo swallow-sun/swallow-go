@@ -204,11 +204,16 @@ type Repository interface {
 	// GetMemoryCandidates 按用户 ID 和状态查候选列表.
 	// status 为空时查所有状态, 按创建时间倒序返回.
 	GetMemoryCandidates(ctx context.Context, userID int64, status string) ([]MemoryCandidate, error)
+	// GetPendingMemoryCandidates 返回当前可以在设备上展示的待确认候选.
+	// deferred_until 仍在未来的候选不会返回，结果按创建时间正序排列.
+	GetPendingMemoryCandidates(ctx context.Context, userID int64, limit int, now time.Time) ([]MemoryCandidate, error)
 	// ConfirmMemoryCandidate 把候选状态从 pending 改成 confirmed, 同时写入正式记忆.
-	// 返回新建的 Memory 记录.
-	ConfirmMemoryCandidate(ctx context.Context, id int64, userID int64) (Memory, error)
+	// expectedRevision 为 0 时不校验版本，非 0 时用于设备端乐观并发控制.
+	ConfirmMemoryCandidate(ctx context.Context, id int64, userID int64, expectedRevision int, resolvedBy, deviceID string) (Memory, error)
 	// RejectMemoryCandidate 把候选状态从 pending 改成 rejected.
-	RejectMemoryCandidate(ctx context.Context, id int64, userID int64) error
+	RejectMemoryCandidate(ctx context.Context, id int64, userID int64, expectedRevision int, resolvedBy, deviceID string) error
+	// DeferMemoryCandidate 保持 pending 状态，但在 deferredUntil 之前不再向设备展示.
+	DeferMemoryCandidate(ctx context.Context, id int64, userID int64, expectedRevision int, deferredUntil time.Time) (MemoryCandidate, error)
 
 	// ===== 长期记忆: 正式记忆管理 =====
 
@@ -216,6 +221,8 @@ type Repository interface {
 	InsertMemory(ctx context.Context, m Memory) (Memory, error)
 	// GetMemory 按 ID 查一条记忆.
 	GetMemory(ctx context.Context, id int64) (Memory, error)
+	// GetMemoryByCandidateID 查找某个候选已经生成的正式记忆，用于确认接口幂等重放.
+	GetMemoryByCandidateID(ctx context.Context, candidateID int64) (Memory, error)
 	// GetMemories 按用户 ID 查正式记忆列表, 只返回 status=active 的记录.
 	GetMemories(ctx context.Context, userID int64) ([]Memory, error)
 	// SearchMemories 按用户 ID + 关键词检索记忆, 只搜 status=active 的记录.
@@ -759,7 +766,7 @@ type ormModelUsage struct {
 // sqliteRepo 是 Repository 接口的 SQLite 实现.
 // 里面就一个字段 db,是 GORM 的数据库连接对象.
 // 所有 Repository 方法都挂在 *sqliteRepo 上,通过 db 操作数据库.
-type sqliteRepo struct {
+type gormRepo struct {
 	// db 是 GORM 的 *gorm.DB 实例,所有数据库操作都靠它
 	db *gorm.DB
 }
@@ -1014,7 +1021,7 @@ const (
 	deviceSyncLogColumns = "id, device_id, user_id, item_id, item_type, payload, received_at"
 
 	// memory_candidates 表列名
-	memoryCandidateColumns = "id, user_id, session_id, trace_id, content, memory_type, source, reason, usage_hint, status, created_at, resolved_at"
+	memoryCandidateColumns = "id, user_id, session_id, trace_id, content, memory_type, source, reason, usage_hint, status, revision, deferred_until, resolved_by, resolved_device_id, created_at, resolved_at"
 
 	// memories 表列名
 	memoryColumns = "id, user_id, candidate_id, source_session_id, content, memory_type, keywords, sync_version, status, created_at, updated_at"
@@ -1365,6 +1372,14 @@ type MemoryCandidate struct {
 	UsageHint string
 	// Status 状态: pending/confirmed/rejected
 	Status string
+	// Revision 候选审核版本，从 1 开始；设备决策使用它做乐观并发控制.
+	Revision int
+	// DeferredUntil 用户选择“稍后”后的再次展示时间，零值表示立即可展示.
+	DeferredUntil time.Time
+	// ResolvedBy 记录审核入口，例如 owner 或 device.
+	ResolvedBy string
+	// ResolvedDeviceID 记录执行审核的设备公开 ID，不记录设备令牌.
+	ResolvedDeviceID string
 	// CreatedAt 创建时间
 	CreatedAt time.Time
 	// ResolvedAt 确认或拒绝时间, 零值表示未处理
@@ -1393,6 +1408,14 @@ type ormMemoryCandidate struct {
 	UsageHint string `gorm:"not null;default:''"`
 	// Status 状态, 不允许空, 默认 pending
 	Status string `gorm:"not null;default:pending;index:idx_memory_candidates_user_status,priority:2"`
+	// Revision 审核版本，设备端提交决策时用于检测并发修改.
+	Revision int `gorm:"not null;default:1"`
+	// DeferredUntil 在此时间前不向设备展示，允许 NULL.
+	DeferredUntil *time.Time `gorm:"index:idx_memory_candidates_review_queue,priority:3"`
+	// ResolvedBy 审核入口，未处理时为空串.
+	ResolvedBy string `gorm:"not null;default:''"`
+	// ResolvedDeviceID 执行审核的设备公开 ID，owner 审核时为空串.
+	ResolvedDeviceID string `gorm:"not null;default:''"`
 	// CreatedAt 创建时间, 不允许空
 	CreatedAt time.Time `gorm:"not null;index:idx_memory_candidates_user_status,priority:3:desc"`
 	// ResolvedAt 确认或拒绝时间, 允许 NULL

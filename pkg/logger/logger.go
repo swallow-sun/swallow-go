@@ -10,10 +10,17 @@
 package logger
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
+	"go.opentelemetry.io/contrib/bridges/otelzap"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
+	"go.opentelemetry.io/otel/sdk/resource"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -79,6 +86,9 @@ var global *zap.Logger
 // logWriter 是当前进程持有的轮转日志写入器，Sync 时关闭。
 var logWriter *lumberjack.Logger
 
+// otelLoggerProvider 只会在 production 初始化，用于退出时刷新 OTLP 批次。
+var otelLoggerProvider *sdklog.LoggerProvider
+
 // environment 保存从 TOML 读取的当前运行环境,用于控制日志格式和最低级别.
 // 默认是开发模式 "development".
 var environment = EnvironmentDevelopment
@@ -87,13 +97,16 @@ var environment = EnvironmentDevelopment
 // 开发和生产环境都以 JSON 同时输出到控制台和配置目录下的日期日志文件。
 func Init(options ...Options) error {
 	opt := Options{
-		Environment: EnvironmentDevelopment,
-		Level:       "debug",
-		Directory:   LogDirectory,
-		MaxSizeMB:   DefaultMaxSizeMB,
-		MaxBackups:  DefaultMaxBackups,
-		MaxAgeDays:  DefaultMaxAgeDays,
-		Compress:    true,
+		Environment:  EnvironmentDevelopment,
+		Level:        "debug",
+		Directory:    LogDirectory,
+		MaxSizeMB:    DefaultMaxSizeMB,
+		MaxBackups:   DefaultMaxBackups,
+		MaxAgeDays:   DefaultMaxAgeDays,
+		Compress:     true,
+		OTLPEndpoint: "localhost:4317",
+		OTLPInsecure: true,
+		ServiceName:  "swallow-go",
 	}
 	if len(options) > 0 {
 		if options[0].Environment != "" {
@@ -115,6 +128,13 @@ func Init(options ...Options) error {
 			opt.MaxAgeDays = options[0].MaxAgeDays
 		}
 		opt.Compress = options[0].Compress
+		if options[0].OTLPEndpoint != "" {
+			opt.OTLPEndpoint = options[0].OTLPEndpoint
+		}
+		opt.OTLPInsecure = options[0].OTLPInsecure
+		if options[0].ServiceName != "" {
+			opt.ServiceName = options[0].ServiceName
+		}
 	}
 	environment = opt.Environment
 	var level zapcore.Level
@@ -126,6 +146,12 @@ func Init(options ...Options) error {
 	if logWriter != nil {
 		_ = logWriter.Close()
 		logWriter = nil
+	}
+	if otelLoggerProvider != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = otelLoggerProvider.Shutdown(ctx)
+		cancel()
+		otelLoggerProvider = nil
 	}
 
 	// logs 目录不存在时自动创建；创建失败直接终止启动，避免误以为日志已经持久化。
@@ -156,16 +182,16 @@ func Init(options ...Options) error {
 	isDev := environment == EnvironmentDevelopment
 
 	if isDev {
-		// 开发环境: console 编码器 + emoji 级别, 更直观.
+		// 开发环境:纯文本 key=value，不混入 JSON 对象。
 		devConfig := zap.NewDevelopmentEncoderConfig()
 		devConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 		devConfig.EncodeLevel = emojiLevelEncoder
-		consoleEncoder = zapcore.NewConsoleEncoder(devConfig)
+		consoleEncoder = newTextEncoder(devConfig)
 		// 重新创建一份相同配置给文件编码器 (EncoderConfig 没有 Clone 方法).
 		fileConfig := zap.NewDevelopmentEncoderConfig()
 		fileConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 		fileConfig.EncodeLevel = emojiLevelEncoder
-		fileEncoder = zapcore.NewConsoleEncoder(fileConfig)
+		fileEncoder = newTextEncoder(fileConfig)
 	} else {
 		// 生产环境: JSON 编码器, 方便机器解析, 保留 trace_id (当前行为不变).
 		prodConfig := zap.NewProductionEncoderConfig()
@@ -185,7 +211,18 @@ func Init(options ...Options) error {
 		consoleCore = &traceIDFilterCore{Core: consoleCore}
 		fileCore = &traceIDFilterCore{Core: fileCore}
 	}
-	core := zapcore.NewTee(consoleCore, fileCore)
+	cores := []zapcore.Core{consoleCore, fileCore}
+	if environment == EnvironmentProduction {
+		otelCore, provider, err := newOTLPCore(opt, level)
+		if err != nil {
+			_ = logWriter.Close()
+			logWriter = nil
+			return fmt.Errorf("initialize OTLP logger: %w", err)
+		}
+		otelLoggerProvider = provider
+		cores = append(cores, otelCore)
+	}
+	core := zapcore.NewTee(cores...)
 
 	// zap.AddCallerSkip(1) 让 caller 往上跳一层,跳过 logger.Info/Warn/Error 封装函数,
 	// 记录真正调用日志的业务代码的文件名和行号.
@@ -226,6 +263,13 @@ func Sync() error {
 	}
 	// 先刷新 zap 的控制台和文件 Core，再关闭文件句柄。
 	syncErr := global.Sync()
+	var otelErr error
+	if otelLoggerProvider != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		otelErr = otelLoggerProvider.Shutdown(ctx)
+		cancel()
+		otelLoggerProvider = nil
+	}
 	if logWriter == nil {
 		return syncErr
 	}
@@ -234,10 +278,45 @@ func Sync() error {
 	if syncErr != nil {
 		return syncErr
 	}
+	if otelErr != nil {
+		return fmt.Errorf("shutdown OTLP logger: %w", otelErr)
+	}
 	if closeErr != nil {
 		return fmt.Errorf("close log file: %w", closeErr)
 	}
 	return nil
+}
+
+func newOTLPCore(opt Options, level zapcore.Level) (zapcore.Core, *sdklog.LoggerProvider, error) {
+	exporterOptions := []otlploggrpc.Option{otlploggrpc.WithEndpoint(opt.OTLPEndpoint)}
+	if opt.OTLPInsecure {
+		exporterOptions = append(exporterOptions, otlploggrpc.WithInsecure())
+	}
+	exporter, err := otlploggrpc.New(context.Background(), exporterOptions...)
+	if err != nil {
+		return nil, nil, err
+	}
+	res, err := resource.New(context.Background(), resource.WithAttributes(
+		attribute.String("service.name", opt.ServiceName),
+		attribute.String("deployment.environment.name", opt.Environment),
+	))
+	if err != nil {
+		_ = exporter.Shutdown(context.Background())
+		return nil, nil, err
+	}
+	provider := sdklog.NewLoggerProvider(
+		sdklog.WithResource(res),
+		sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter)),
+	)
+	core := otelzap.NewCore("github.com/swallow-sun/swallow-go",
+		otelzap.WithLoggerProvider(provider),
+	)
+	levelCore, err := zapcore.NewIncreaseLevelCore(core, level)
+	if err != nil {
+		_ = provider.Shutdown(context.Background())
+		return nil, nil, err
+	}
+	return levelCore, provider, nil
 }
 
 // AddFields 为当前进程后续日志附加公共字段,例如 startup_id.

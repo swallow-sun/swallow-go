@@ -194,6 +194,14 @@ type ListCandidatesResult struct {
 type ConfirmCandidateResult struct {
 	Memory data.Memory `json:"memory"` /* 确认后生成的正式记忆 */
 }
+
+// CandidateDecisionResult 是设备审核候选后的稳定响应.
+type CandidateDecisionResult struct {
+	Candidate data.MemoryCandidate `json:"candidate"`
+	Memory    *data.Memory         `json:"memory,omitempty"`
+	Decision  string               `json:"decision"`
+	Replayed  bool                 `json:"replayed"`
+}
 type ListMemoriesResult struct {
 	Items []data.Memory `json:"items"` /* 正式记忆列表 */
 }
@@ -226,20 +234,22 @@ type ChatEventType int
 // iota 是 Go 的常量计数器, 从 0 开始, 每出现一行 const 自动 +1
 // iota + 1 让值从 1 开始(0 在 Go 里常表示"零值", 不方便区分"未设置"和"第一个")
 const (
-	ChatEventMessage    ChatEventType = iota + 1 // 消息内容片段, 值为 1
-	ChatEventUsage                               // token 用量和性能指标, 值为 2
-	ChatEventDone                                // 正常结束, 值为 3
-	ChatEventReplayDone                          // 幂等重放结束(区别于正常 done), 值为 4
+	ChatEventMessage     ChatEventType = iota + 1 // 消息内容片段, 值为 1
+	ChatEventUsage                                // token 用量和性能指标, 值为 2
+	ChatEventDone                                 // 正常结束, 值为 3
+	ChatEventReplayDone                           // 幂等重放结束(区别于正常 done), 值为 4
+	ChatEventPerformance                          // LLM 生成并经服务端校验的表演计划
 )
 
 // ChatEvent 是 service 通过 channel 发给 handler 的事件.
 // handler 从 channel 读到事件后, 转成对应的 SSE 帧写给客户端.
 type ChatEvent struct {
-	Type     ChatEventType // 事件类型
-	Content  string        // message 事件的文本片段
-	Usage    *UsageData    // usage/done 事件的 token 用量(nil 表示不附带)
-	Replayed bool          // 是否幂等重放(true 表示这是历史结果的重放)
-	TraceID  string        // 关联的 trace ID
+	Type        ChatEventType       // 事件类型
+	Content     string              // message 事件的文本片段
+	Usage       *UsageData          // usage/done 事件的 token 用量(nil 表示不附带)
+	Replayed    bool                // 是否幂等重放(true 表示这是历史结果的重放)
+	TraceID     string              // 关联的 trace ID
+	Performance *emotion.ParsedTags // performance 事件的场景、情绪、语音与动作参数
 }
 
 // UsageData 是 token 用量和性能指标的快照.

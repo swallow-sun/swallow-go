@@ -27,8 +27,9 @@ import (
 //   - sessionID: 会话 ID
 //   - userID: 用户 ID
 //   - traceID: 链路追踪 ID
+//
 // 返回值:ChatRequest(记录),bool(是否新建成功),error
-func (r *sqliteRepo) BeginChatRequest(ctx context.Context, clientMessageID, sessionID string, userID int64, traceID string) (ChatRequest, bool, error) {
+func (r *gormRepo) BeginChatRequest(ctx context.Context, clientMessageID, sessionID string, userID int64, traceID string) (ChatRequest, bool, error) {
 	// 构造一条 accepted 状态的记录,准备插进去
 	model := ormChatRequest{
 		ClientMessageID: clientMessageID,
@@ -84,7 +85,7 @@ func (r *sqliteRepo) BeginChatRequest(ctx context.Context, clientMessageID, sess
 // MarkChatRequestRunning 关联已保存的用户消息,并把请求切换为执行中.
 // 参数 requestID 是请求记录的主键,userDialogueID 是已保存的用户消息 ID.
 // 状态流转:accepted → running.
-func (r *sqliteRepo) MarkChatRequestRunning(ctx context.Context, requestID int64, userDialogueID int64) error {
+func (r *gormRepo) MarkChatRequestRunning(ctx context.Context, requestID int64, userDialogueID int64) error {
 	// updates 是要更新的字段,写在 map 里方便后面打日志
 	//   status 改成 running
 	//   user_dialogue_id 记下用户消息的 ID
@@ -124,7 +125,7 @@ func (r *sqliteRepo) MarkChatRequestRunning(ctx context.Context, requestID int64
 // CompleteChatRequest 关联完整助手回复,并把请求切换为已完成.
 // 参数 requestID 是请求记录的主键,assistantDialogueID 是已保存的助手消息 ID.
 // 状态流转:running → completed.
-func (r *sqliteRepo) CompleteChatRequest(ctx context.Context, requestID int64, assistantDialogueID int64) error {
+func (r *gormRepo) CompleteChatRequest(ctx context.Context, requestID int64, assistantDialogueID int64) error {
 	// 记下完成时间
 	completedAt := time.Now()
 
@@ -166,7 +167,7 @@ func (r *sqliteRepo) CompleteChatRequest(ctx context.Context, requestID int64, a
 // FailChatRequest 记录稳定错误码;失败请求不会被同一幂等键自动重新执行.
 // 参数 requestID 是请求记录的主键,errorCode 是稳定的错误码(不是详细的错误信息).
 // 状态流转:accepted/running → failed.
-func (r *sqliteRepo) FailChatRequest(ctx context.Context, requestID int64, errorCode string) error {
+func (r *gormRepo) FailChatRequest(ctx context.Context, requestID int64, errorCode string) error {
 	// updates 是要更新的字段,写在 map 里方便后面打日志
 	//   status 改成 failed
 	//   error_code 记下错误码

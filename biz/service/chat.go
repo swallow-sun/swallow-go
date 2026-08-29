@@ -477,6 +477,9 @@ func (s *ChatService) streamLoop(
 		TotalDurationMs:  metrics.TotalDurationMs, // 总耗时(毫秒)
 	}
 	// 通过 ChatEventUsage 事件发给 handler, handler 转成 SSE usage 帧写给客户端
+	if tags, ok := emotion.ParseTags(replyBuilder.String()); ok {
+		sendEvent(events, ChatEvent{Type: ChatEventPerformance, Performance: &tags, TraceID: traceID})
+	}
 	sendEvent(events, ChatEvent{Type: ChatEventUsage, Usage: usageData, TraceID: traceID})
 
 	// 所有操作成功后才发送 done 事件.

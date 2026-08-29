@@ -1,0 +1,26 @@
+services:
+  swallow-go:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: swallow-go:local
+    container_name: swallow-go
+    restart: unless-stopped
+    ports:
+      - "8888:8888"
+      - "9881:9881"
+    volumes:
+      - ./config.local.toml:/app/config.local.toml:ro
+      - swallow-data:/app/data
+      - swallow-logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8888/ping"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    stop_grace_period: 20s
+
+volumes:
+  swallow-data:
+  swallow-logs:

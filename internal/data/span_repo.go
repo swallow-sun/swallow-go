@@ -24,7 +24,7 @@ import (
 // TableName 指定 spans 表名，不依赖 GORM 自动命名规则。
 func (ormSpan) TableName() string { return "spans" }
 
-func (r *sqliteRepo) InsertSpan(ctx context.Context, span Span) error {
+func (r *gormRepo) InsertSpan(ctx context.Context, span Span) error {
 	// 业务对象转 ORM 模型
 	model := spanToORM(span)
 

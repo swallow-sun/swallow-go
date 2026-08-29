@@ -66,16 +66,11 @@ func NewDeps(cfg *config.Config, repo data.Repository) (*Deps, error) {
 
 	// 创建 TTS Provider (语音合成).
 	// 根据 config.toml 里 [tts].provider 选择不同的 TTS 供应商:
-	//   - "cosyvoice": 本地 CosyVoice2 (tts_server.py), GPU 推理, 支持流式
 	//   - "siliconflow": 硅基流动 TTS, HTTP POST, 国内直连, 需要 api_key
 	//   - "aliyun": 阿里云百炼 CosyVoice, WebSocket 双向流式, 需要 api_key
 	//   - "edge": 微软 edge-tts, WebSocket, 不需要 key (国内不稳定)
 	var ttsProvider tts.Provider
 	switch cfg.TTS.Provider {
-	case "cosyvoice":
-		ttsProvider = tts.NewCosyVoice(tts.CosyVoiceConfig{
-			BaseURL: cfg.TTS.CosyVoiceBaseURL,
-		})
 	case "siliconflow":
 		ttsProvider = tts.NewSiliconFlow(tts.Config{
 			BaseURL:        cfg.TTS.BaseURL,
@@ -119,6 +114,8 @@ func NewDeps(cfg *config.Config, repo data.Repository) (*Deps, error) {
 			Volume:       cfg.TTS.Volume,
 			Pitch:        cfg.TTS.Pitch,
 		})
+	default:
+		return nil, fmt.Errorf("create TTS provider: unsupported cloud provider %q", cfg.TTS.Provider)
 	}
 
 	// 用 svcDeps 创建六个 Service,装进 Deps 结构体返回.

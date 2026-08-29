@@ -17,7 +17,7 @@ import (
 
 // GetAppSetting 按稳定键读取一项普通配置.
 // 参数 key 是配置项的键名.查不到返回 sql.ErrNoRows.
-func (r *sqliteRepo) GetAppSetting(ctx context.Context, key string) (AppSetting, error) {
+func (r *gormRepo) GetAppSetting(ctx context.Context, key string) (AppSetting, error) {
 	// 空的 ORM 模型变量,准备接收查询结果
 	var model ormAppSetting
 
@@ -32,7 +32,7 @@ func (r *sqliteRepo) GetAppSetting(ctx context.Context, key string) (AppSetting,
 
 // CreateAppSettingIfAbsent 只在配置尚不存在时写入启动默认值.
 // 返回 bool:true 表示新建成功,false 表示已存在(跳过).
-func (r *sqliteRepo) CreateAppSettingIfAbsent(ctx context.Context, setting AppSetting) (bool, error) {
+func (r *gormRepo) CreateAppSettingIfAbsent(ctx context.Context, setting AppSetting) (bool, error) {
 	// 先把业务对象转成 ORM 模型
 	model := appSettingToORM(setting)
 
@@ -59,7 +59,7 @@ func (r *sqliteRepo) CreateAppSettingIfAbsent(ctx context.Context, setting AppSe
 
 // UpsertAppSetting 创建或更新一项普通配置.
 // 配置不存在就新建,已存在就更新指定的字段.
-func (r *sqliteRepo) UpsertAppSetting(ctx context.Context, setting AppSetting) error {
+func (r *gormRepo) UpsertAppSetting(ctx context.Context, setting AppSetting) error {
 	// 业务对象转 ORM 模型
 	model := appSettingToORM(setting)
 
@@ -90,7 +90,7 @@ func (r *sqliteRepo) UpsertAppSetting(ctx context.Context, setting AppSetting) e
 
 // DeleteAppSetting 删除指定普通配置,仅用于验证失败时恢复旧状态.
 // 参数 key 是配置项的键名.
-func (r *sqliteRepo) DeleteAppSetting(ctx context.Context, key string) error {
+func (r *gormRepo) DeleteAppSetting(ctx context.Context, key string) error {
 	// .Where("setting_key = ?", key) 按键名找
 	// .Delete(&ormAppSetting{}) 删除匹配的记录
 	//   相当于 DELETE FROM app_settings WHERE setting_key = ?
@@ -107,7 +107,7 @@ func (r *sqliteRepo) DeleteAppSetting(ctx context.Context, key string) error {
 
 // GetEncryptedSecret 按稳定键读取一项密文记录.
 // 参数 key 是密钥的键名.查不到返回 sql.ErrNoRows.
-func (r *sqliteRepo) GetEncryptedSecret(ctx context.Context, key string) (EncryptedSecret, error) {
+func (r *gormRepo) GetEncryptedSecret(ctx context.Context, key string) (EncryptedSecret, error) {
 	// 空的 ORM 模型变量
 	var model ormEncryptedSecret
 
@@ -123,7 +123,7 @@ func (r *sqliteRepo) GetEncryptedSecret(ctx context.Context, key string) (Encryp
 // CreateEncryptedSecretIfAbsent 只在密钥尚不存在时保存首次加密结果.
 // 返回 bool:true 表示新建成功,false 表示已存在(跳过).
 // 这样可以保证首次加密的结果不会被覆盖,除非显式调 Upsert.
-func (r *sqliteRepo) CreateEncryptedSecretIfAbsent(ctx context.Context, secret EncryptedSecret) (bool, error) {
+func (r *gormRepo) CreateEncryptedSecretIfAbsent(ctx context.Context, secret EncryptedSecret) (bool, error) {
 	// 业务对象转 ORM 模型
 	model := encryptedSecretToORM(secret)
 
@@ -146,7 +146,7 @@ func (r *sqliteRepo) CreateEncryptedSecretIfAbsent(ctx context.Context, secret E
 
 // UpsertEncryptedSecret 创建或更新一项密文;调用的人必须先完成加密.
 // 参数 secret 是加密后的密文,调用前必须把 Ciphertext,Nonce 等字段填好.
-func (r *sqliteRepo) UpsertEncryptedSecret(ctx context.Context, secret EncryptedSecret) error {
+func (r *gormRepo) UpsertEncryptedSecret(ctx context.Context, secret EncryptedSecret) error {
 	// 业务对象转 ORM 模型
 	model := encryptedSecretToORM(secret)
 
@@ -175,7 +175,7 @@ func (r *sqliteRepo) UpsertEncryptedSecret(ctx context.Context, secret Encrypted
 
 // DeleteEncryptedSecret 删除指定密文,仅用于写入后验证失败时恢复旧状态.
 // 参数 key 是密钥的键名.
-func (r *sqliteRepo) DeleteEncryptedSecret(ctx context.Context, key string) error {
+func (r *gormRepo) DeleteEncryptedSecret(ctx context.Context, key string) error {
 	// .Where("secret_key = ?", key) 按键名找
 	// .Delete(&ormEncryptedSecret{}) 删除匹配的记录
 	//   相当于 DELETE FROM encrypted_secrets WHERE secret_key = ?

@@ -1,7 +1,7 @@
-﻿// service.go 放运行配置服务:管理数据库运行配置及敏感配置的加解密.
+// service.go 放运行配置服务:管理数据库运行配置及敏感配置的加解密.
 //
 // 做的事情:
-//  1. 加载主密钥:从数据库旁的 .key 文件读取 AES-256 主密钥,首次运行时自动生成.
+//  1. 加载主密钥:从配置的本地 key 文件读取 AES-256 主密钥,首次运行时自动生成.
 //  2. LoadInto:把数据库里的配置加载到 config.Config,覆盖 TOML 里的初始值.
 //  3. SetSetting/SetSecret:运行时修改普通配置和加密密钥,修改后做模型连通性测试,失败自动回滚.
 //  4. encrypt/decrypt:用 AES-256-GCM 加解密敏感配置.
@@ -33,27 +33,27 @@ import (
 )
 
 // New 创建运行配置服务.
-// 主密钥固定从数据库旁的本地 key 文件读取;首次运行时自动生成.
+// 主密钥从指定的本地 key 文件读取;首次运行时自动生成.
 // 参数:
 //   - repo: 数据库仓库,用来读写配置表
-//   - databasePath: 数据库文件路径,主密钥文件就放在它旁边(路径 = databasePath + .key)
+//   - masterKeyPath: 主密钥文件路径
 //
 // 返回值:
 //   - *Service: 初始化好的配置服务
 //   - error: 主密钥加载或生成失败时返回错误
-func New(repo data.Repository, databasePath string) (*Service, error) {
+func New(repo data.Repository, masterKeyPath string) (*Service, error) {
 	// loadOrCreateMasterKey 尝试读取主密钥文件,文件不存在就生成一个新的
 	// 返回三样东西:base64 编码的密钥字符串,是否是首次创建的,错误
-	// 举例:databasePath = "data/swallow.db",那密钥文件路径就是 "data/swallow.db.key"
-	encodedKey, created, err := loadOrCreateMasterKey(databasePath + MasterKeyFileSuffix)
+	// PostgreSQL 没有本地数据库文件，因此密钥路径必须与数据库连接配置解耦。
+	encodedKey, created, err := loadOrCreateMasterKey(masterKeyPath)
 	if err != nil {
 		return nil, err
 	}
 	// 根据是首次创建还是读取已有,打不同的日志
 	if created {
-		logger.Info("Generated local master key file", zap.String("key_file", databasePath+MasterKeyFileSuffix))
+		logger.Info("Generated local master key file", zap.String("key_file", masterKeyPath))
 	} else {
-		logger.Debug("Read local master key file", zap.String("key_file", databasePath+MasterKeyFileSuffix))
+		logger.Debug("Read local master key file", zap.String("key_file", masterKeyPath))
 	}
 	// base64.StdEncoding.DecodeString 把 base64 编码的密钥字符串解码成原始字节
 	// 举例:encodedKey = "dGVzdA==" → masterKey = [116, 101, 115, 116]
@@ -117,10 +117,7 @@ func (s *Service) LoadInto(ctx context.Context, cfg *config.Config) (loadErr err
 	if err := s.seedSetting(ctx, SettingLLMModel, cfg.LLM.Model, "Default LLM model name"); err != nil {
 		return err
 	}
-	// API Key 和 Owner Token 是敏感配置,需要加密后再存
-	if err := s.seedSecret(ctx, SecretLLMAPIKey, cfg.LLM.APIKey); err != nil {
-		return err
-	}
+	// owner token 仍按现有身份引导流程初始化；所有供应商 API Key 严禁从 TOML seed。
 	if err := s.seedSecret(ctx, SecretOwnerToken, cfg.Auth.OwnerToken); err != nil {
 		return err
 	}
@@ -136,7 +133,27 @@ func (s *Service) LoadInto(ctx context.Context, cfg *config.Config) (loadErr err
 		return err
 	}
 	// getOptionalSecret 读敏感配置并解密,数据库没有的话返回空字符串(不报错)
-	apiKey, err := s.getOptionalSecret(ctx, SecretLLMAPIKey)
+	llmAPIKey, err := s.getOptionalSecret(ctx, SecretLLMAPIKey)
+	if err != nil {
+		return err
+	}
+	asrAPIKey, err := s.getOptionalSecret(ctx, SecretASRAPIKey)
+	if err != nil {
+		return err
+	}
+	asrAliyunAPIKey, err := s.getOptionalSecret(ctx, SecretASRAliyunAPIKey)
+	if err != nil {
+		return err
+	}
+	asrSiliconFlowAPIKey, err := s.getOptionalSecret(ctx, SecretASRSiliconFlowAPIKey)
+	if err != nil {
+		return err
+	}
+	ttsAPIKey, err := s.getOptionalSecret(ctx, SecretTTSAPIKey)
+	if err != nil {
+		return err
+	}
+	ttsAliyunAPIKey, err := s.getOptionalSecret(ctx, SecretTTSAliyunAPIKey)
 	if err != nil {
 		return err
 	}
@@ -148,13 +165,18 @@ func (s *Service) LoadInto(ctx context.Context, cfg *config.Config) (loadErr err
 	// 把数据库读出来的值覆盖到 cfg 结构体里
 	cfg.LLM.BaseURL = baseURL
 	cfg.LLM.Model = model
-	// 数据库没有对应密文时(返回空字符串),保留配置文件或环境变量里的值
-	// 这样既支持"数据库有加密配置",也支持"数据库没配置,用 TOML 里的值"
-	if apiKey != "" {
-		cfg.LLM.APIKey = apiKey
-	}
+	// API Key 的唯一来源是 encrypted_secrets；即使数据库缺失也绝不回退 TOML。
+	cfg.LLM.APIKey = llmAPIKey
+	cfg.ASR.APIKey = asrAPIKey
+	cfg.ASR.Aliyun.APIKey = asrAliyunAPIKey
+	cfg.ASR.SiliconFlow.APIKey = asrSiliconFlowAPIKey
+	cfg.TTS.APIKey = ttsAPIKey
+	cfg.TTS.Aliyun.APIKey = ttsAliyunAPIKey
 	if ownerToken != "" {
 		cfg.Auth.OwnerToken = ownerToken
+	}
+	if strings.TrimSpace(cfg.LLM.APIKey) == "" {
+		return fmt.Errorf("database secret %s is required", SecretLLMAPIKey)
 	}
 
 	// 第三步:如果本次启动改过配置(seed 写了新值),做一次模型连通性测试
@@ -255,7 +277,8 @@ func (s *Service) SetSecret(ctx context.Context, key, plaintext string) error {
 //   - description: 配置描述
 //
 // 逻辑:值为空 → 检查数据库有没有 → 有就跳过,没有就报错
-//        值非空 → 数据库有就跳过,没有就写入
+//
+//	值非空 → 数据库有就跳过,没有就写入
 func (s *Service) seedSetting(ctx context.Context, key, value, description string) error {
 	// 值为空的情况:配置文件里没写这个配置
 	if strings.TrimSpace(value) == "" {
@@ -599,10 +622,10 @@ func (s *Service) encrypt(key, plaintext string) (data.EncryptedSecret, error) {
 	ciphertext := gcm.Seal(nil, nonce, []byte(plaintext), []byte(key))
 	// 打包成 EncryptedSecret 结构体返回
 	return data.EncryptedSecret{
-		Key: key,          // 配置键名
-		Ciphertext: ciphertext, // 加密后的密文(含认证标签)
-		Nonce: nonce,           // 一次性随机数,解密时要用
-		Algorithm: AlgorithmAESGCM, // 加密算法名,将来换算法时能区分
+		Key:        key,               // 配置键名
+		Ciphertext: ciphertext,        // 加密后的密文(含认证标签)
+		Nonce:      nonce,             // 一次性随机数,解密时要用
+		Algorithm:  AlgorithmAESGCM,   // 加密算法名,将来换算法时能区分
 		KeyVersion: CurrentKeyVersion, // 密钥版本,将来换密钥时能区分
 	}, nil
 }

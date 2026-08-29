@@ -75,10 +75,31 @@ const endOfPrompt = "<|endofprompt|>"
 //	ApplyTonePrefix("你好啊", "warm") → "用温和的语气说 <|endofprompt|>你好啊"
 //	ApplyTonePrefix("你好啊", "")    → "你好啊" (不加前缀, 用默认语气)
 func ApplyTonePrefix(text, tone string) string {
+	return ApplyProsodyPrefix(text, tone, 1.0)
+}
+
+// ApplyProsodyPrefix combines the LLM-selected voice emotion and speaking rate
+// into one CosyVoice instruction so rate changes do not alter PCM sample rate/pitch.
+func ApplyProsodyPrefix(text, tone string, speakingRate float64) string {
 	// tone 为空或不在映射表里, 不加前缀, 用 TTS 默认语气
 	prompt, ok := toneToPrompt[strings.ToLower(strings.TrimSpace(tone))]
-	if !ok {
+	if speakingRate == 0 {
+		speakingRate = 1.0
+	}
+	ratePrompt := ""
+	if speakingRate <= 0.92 {
+		ratePrompt = "语速稍慢"
+	} else if speakingRate >= 1.08 {
+		ratePrompt = "语速稍快"
+	}
+	if !ok && ratePrompt == "" {
 		return text
+	}
+	if !ok {
+		prompt = "用自然的语气说"
+	}
+	if ratePrompt != "" {
+		prompt = strings.TrimSuffix(prompt, "说") + "，" + ratePrompt + "地说"
 	}
 
 	// 官方示例让指令与正文紧贴 <|endofprompt|>，中间不插入空格。

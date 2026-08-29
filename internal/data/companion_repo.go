@@ -11,7 +11,7 @@ import (
 func (ormCompanionState) TableName() string { return "companion_states" }
 
 // GetCompanionState 读取指定用户的关系人格状态。
-func (r *sqliteRepo) GetCompanionState(ctx context.Context, userID int64) (CompanionState, error) {
+func (r *gormRepo) GetCompanionState(ctx context.Context, userID int64) (CompanionState, error) {
 	var model ormCompanionState
 	if err := r.db.WithContext(ctx).Where("user_id = ?", userID).First(&model).Error; err != nil {
 		return CompanionState{}, repositoryError(err)
@@ -20,7 +20,7 @@ func (r *sqliteRepo) GetCompanionState(ctx context.Context, userID int64) (Compa
 }
 
 // UpsertCompanionState 按用户覆盖更新，使情感表达能跨会话延续。
-func (r *sqliteRepo) UpsertCompanionState(ctx context.Context, state CompanionState) (CompanionState, error) {
+func (r *gormRepo) UpsertCompanionState(ctx context.Context, state CompanionState) (CompanionState, error) {
 	model := ormCompanionState{
 		UserID:              state.UserID,
 		Concern:             state.Concern,

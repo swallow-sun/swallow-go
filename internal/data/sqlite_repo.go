@@ -48,7 +48,7 @@ func (ormEncryptedSecret) TableName() string { return "encrypted_secrets" }
 // CreateUser 新增用户,并返回数据库生成的 ID 和时间字段.
 // 参数 name 是用户名,role 是角色(比如 "owner").
 // 返回的 User 结构体里 ID,CreatedAt 等字段是数据库自动填好的.
-func (r *sqliteRepo) CreateUser(ctx context.Context, name, role string) (User, error) {
+func (r *gormRepo) CreateUser(ctx context.Context, name, role string) (User, error) {
 	// 先把传进来的 name 和 role 塞进 ORM 模型,ID 留空让数据库自增
 	model := ormUser{Name: name, Role: role}
 
@@ -81,7 +81,7 @@ func (r *sqliteRepo) CreateUser(ctx context.Context, name, role string) (User, e
 
 // GetUser 按用户 ID 查询用户.
 // 参数 id 是用户主键.查不到返回的 error 是 sql.ErrNoRows.
-func (r *sqliteRepo) GetUser(ctx context.Context, id int64) (User, error) {
+func (r *gormRepo) GetUser(ctx context.Context, id int64) (User, error) {
 	// 声明一个空的 ORM 模型变量,准备接收查出来的数据
 	var model ormUser
 
@@ -98,7 +98,7 @@ func (r *sqliteRepo) GetUser(ctx context.Context, id int64) (User, error) {
 
 // GetUserByName 按用户名查询第一条匹配的用户记录.
 // 参数 name 是用户名.查不到返回 sql.ErrNoRows.
-func (r *sqliteRepo) GetUserByName(ctx context.Context, name string) (User, error) {
+func (r *gormRepo) GetUserByName(ctx context.Context, name string) (User, error) {
 	// 空的 ORM 模型变量,准备接收查询结果
 	var model ormUser
 
@@ -114,7 +114,7 @@ func (r *sqliteRepo) GetUserByName(ctx context.Context, name string) (User, erro
 
 // UpdateUserActive 将用户最后活跃时间更新为当前时间.
 // 参数 id 是用户 ID.每次用户有操作(发消息等)就调一次.
-func (r *sqliteRepo) UpdateUserActive(ctx context.Context, id int64) error {
+func (r *gormRepo) UpdateUserActive(ctx context.Context, id int64) error {
 	// r.db.WithContext(ctx) 挂上 context
 	// .Model(&ormUser{}) 指定要操作哪张表(users 表)
 	//   这一步相当于告诉 GORM 后面的 .Where .Update 都是针对 users 表的
@@ -135,7 +135,7 @@ func (r *sqliteRepo) UpdateUserActive(ctx context.Context, id int64) error {
 // CreateSession 为用户新增会话,并返回完整会话记录.
 // 参数 sessionID 是外部生成的会话 ID(比如 UUID),userID 是用户 ID.
 // 返回的 Session 里有数据库自动填的 StartedAt,LastActiveAt 等字段.
-func (r *sqliteRepo) CreateSession(ctx context.Context, sessionID string, userID int64) (Session, error) {
+func (r *gormRepo) CreateSession(ctx context.Context, sessionID string, userID int64) (Session, error) {
 	// 构造 ORM 模型:ID 用传进来的 sessionID,UserID 用传进来的用户 ID
 	// Status 设成 "active"(虽然表定义里有默认值,这里显式写更稳)
 	model := ormSession{ID: sessionID, UserID: userID, Status: SessionStatusActive}
@@ -160,7 +160,7 @@ func (r *sqliteRepo) CreateSession(ctx context.Context, sessionID string, userID
 
 // GetSession 按 session ID 查询会话.
 // 参数 sessionID 是会话 ID(字符串).查不到返回 sql.ErrNoRows.
-func (r *sqliteRepo) GetSession(ctx context.Context, sessionID string) (Session, error) {
+func (r *gormRepo) GetSession(ctx context.Context, sessionID string) (Session, error) {
 	// 空的 ORM 模型变量,准备接收查询结果
 	var model ormSession
 
@@ -176,7 +176,7 @@ func (r *sqliteRepo) GetSession(ctx context.Context, sessionID string) (Session,
 // GetSessionForUser 按会话 ID 查询会话, 同时校验会话属于指定用户.
 // 如果会话不存在或不属于该用户, 都返回 sql.ErrNoRows.
 // 这样调用方无法区分"会话不存在"和"不属于该用户", 防止枚举他人会话.
-func (r *sqliteRepo) GetSessionForUser(ctx context.Context, sessionID string, userID int64) (Session, error) {
+func (r *gormRepo) GetSessionForUser(ctx context.Context, sessionID string, userID int64) (Session, error) {
 	// 空的 ORM 模型变量, 准备接收查询结果
 	var model ormSession
 
@@ -192,7 +192,7 @@ func (r *sqliteRepo) GetSessionForUser(ctx context.Context, sessionID string, us
 
 // UpdateSessionActive 将会话最后活跃时间更新为当前时间.
 // 参数 sessionID 是会话 ID.每次这个会话有新消息就调一次.
-func (r *sqliteRepo) UpdateSessionActive(ctx context.Context, sessionID string) error {
+func (r *gormRepo) UpdateSessionActive(ctx context.Context, sessionID string) error {
 	// .Model(&ormSession{}) 指定操作 sessions 表
 	// .Where("id = ?", sessionID) 按主键找
 	// .Update("last_active_at", time.Now()) 更新单个字段
@@ -215,7 +215,7 @@ func (r *sqliteRepo) UpdateSessionActive(ctx context.Context, sessionID string) 
 //   - content: 消息内容
 //   - usage: token 用量统计
 //   - traceID: 链路追踪 ID
-func (r *sqliteRepo) InsertDialogue(ctx context.Context, sessionID string, userID int64, role, content string, usage TokenUsage, traceID string) (Dialogue, error) {
+func (r *gormRepo) InsertDialogue(ctx context.Context, sessionID string, userID int64, role, content string, usage TokenUsage, traceID string) (Dialogue, error) {
 	// 把传进来的参数都塞进 ORM 模型里
 	// token 用量的字段一个个拆开存,方便后面按用量统计
 	model := ormDialogue{
@@ -254,7 +254,7 @@ func (r *sqliteRepo) InsertDialogue(ctx context.Context, sessionID string, userI
 
 // GetDialogue 按主键读取一条对话,用于幂等重试时返回已经完成的结果.
 // 参数 id 是 dialogues 表的自增主键.查不到返回 sql.ErrNoRows.
-func (r *sqliteRepo) GetDialogue(ctx context.Context, id int64) (Dialogue, error) {
+func (r *gormRepo) GetDialogue(ctx context.Context, id int64) (Dialogue, error) {
 	// 空的 ORM 模型变量
 	var model ormDialogue
 
@@ -269,7 +269,7 @@ func (r *sqliteRepo) GetDialogue(ctx context.Context, id int64) (Dialogue, error
 
 // GetDialogueByTraceAndRole 查询某次请求保存的指定角色消息.
 // 比如幂等重试时,要拿之前保存的 assistant 消息,就传 traceID 和 "assistant".
-func (r *sqliteRepo) GetDialogueByTraceAndRole(ctx context.Context, traceID, role string) (Dialogue, error) {
+func (r *gormRepo) GetDialogueByTraceAndRole(ctx context.Context, traceID, role string) (Dialogue, error) {
 	// 空的 ORM 模型变量
 	var model ormDialogue
 
@@ -289,7 +289,7 @@ func (r *sqliteRepo) GetDialogueByTraceAndRole(ctx context.Context, traceID, rol
 // GetRecentDialogues 查询最近 limit 条消息,并按从旧到新的顺序返回.
 // 参数 sessionID 指定查哪个会话,limit 限制条数.
 // 返回的消息是按时间从旧到新排的,方便上层直接拼进上下文发给模型.
-func (r *sqliteRepo) GetRecentDialogues(ctx context.Context, sessionID string, limit int) ([]Dialogue, error) {
+func (r *gormRepo) GetRecentDialogues(ctx context.Context, sessionID string, limit int) ([]Dialogue, error) {
 	// 切片变量,准备接收查询结果(GORM 会把多条记录塞进来)
 	var models []ormDialogue
 
@@ -320,7 +320,7 @@ func (r *sqliteRepo) GetRecentDialogues(ctx context.Context, sessionID string, l
 // 如果会话不存在或不属于该用户, 返回空列表(不报错).
 // 通过先查 GetSessionForUser 确认归属, 再查对话.
 // 这样防止用户 A 读取用户 B 的对话历史.
-func (r *sqliteRepo) GetRecentDialoguesForUser(ctx context.Context, sessionID string, userID int64, limit int) ([]Dialogue, error) {
+func (r *gormRepo) GetRecentDialoguesForUser(ctx context.Context, sessionID string, userID int64, limit int) ([]Dialogue, error) {
 	// 先校验会话是否属于该用户, 不属于就返回空列表
 	// 不用 GetSessionForUser 是因为这里不关心会话存不存在, 只要不属于该用户就返回空
 	// 用 WHERE session_id = ? AND user_id = ? 直接在对话表上过滤更简洁
@@ -348,7 +348,7 @@ func (r *sqliteRepo) GetRecentDialoguesForUser(ctx context.Context, sessionID st
 //   - durationMs: 耗时毫秒
 //   - success: 成功没有
 //   - traceID: 链路追踪 ID
-func (r *sqliteRepo) InsertEvent(ctx context.Context, eventType string, userID *int64, data string, durationMs int64, success bool, traceID string) error {
+func (r *gormRepo) InsertEvent(ctx context.Context, eventType string, userID *int64, data string, durationMs int64, success bool, traceID string) error {
 	// 把参数塞进 ORM 模型
 	// Success 传的是指针(&success),因为表里用 *bool 可空布尔类型
 	model := ormEvent{EventType: eventType, UserID: userID, EventData: data, TraceID: traceID, DurationMs: durationMs, Success: &success}
@@ -379,7 +379,7 @@ func (r *sqliteRepo) InsertEvent(ctx context.Context, eventType string, userID *
 
 // Close 关闭 GORM 使用的底层 sql.DB 连接池.
 // 程序退出时调,释放数据库连接资源.
-func (r *sqliteRepo) Close() error {
+func (r *gormRepo) Close() error {
 	// r.db.DB() 从 GORM 取出底层的 *sql.DB 连接池对象
 	sqlDB, err := r.db.DB()
 	if err != nil {

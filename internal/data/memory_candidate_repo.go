@@ -29,7 +29,7 @@ import (
 // TableName 指定 memory_candidates 表名。
 func (ormMemoryCandidate) TableName() string { return "memory_candidates" }
 
-func (r *sqliteRepo) InsertMemoryCandidate(ctx context.Context, c MemoryCandidate) (MemoryCandidate, error) {
+func (r *gormRepo) InsertMemoryCandidate(ctx context.Context, c MemoryCandidate) (MemoryCandidate, error) {
 	// 业务对象转 ORM 模型
 	model := memoryCandidateToORM(c)
 
@@ -56,7 +56,7 @@ func (r *sqliteRepo) InsertMemoryCandidate(ctx context.Context, c MemoryCandidat
 
 // GetMemoryCandidate 按 ID 查一条候选.
 // 查不到返回 sql.ErrNoRows.
-func (r *sqliteRepo) GetMemoryCandidate(ctx context.Context, id int64) (MemoryCandidate, error) {
+func (r *gormRepo) GetMemoryCandidate(ctx context.Context, id int64) (MemoryCandidate, error) {
 	// .Select(memoryCandidateColumns) 只查需要的列, 不用 SELECT *
 	// .First(&model, id) 按主键查一条
 	var model ormMemoryCandidate
@@ -68,7 +68,7 @@ func (r *sqliteRepo) GetMemoryCandidate(ctx context.Context, id int64) (MemoryCa
 
 // GetMemoryCandidates 按用户 ID 和状态查候选列表.
 // status 为空时查所有状态, 按创建时间倒序返回.
-func (r *sqliteRepo) GetMemoryCandidates(ctx context.Context, userID int64, status string) ([]MemoryCandidate, error) {
+func (r *gormRepo) GetMemoryCandidates(ctx context.Context, userID int64, status string) ([]MemoryCandidate, error) {
 	// .Select(memoryCandidateColumns) 只查需要的列
 	// .Where("user_id = ?", userID) 按用户过滤
 	// .Order("created_at DESC") 按创建时间倒序(最新的在前)
@@ -91,12 +91,42 @@ func (r *sqliteRepo) GetMemoryCandidates(ctx context.Context, userID int64, stat
 	return result, nil
 }
 
+// GetPendingMemoryCandidates 返回设备当前可以展示的候选队列.
+// “稍后”候选在 deferred_until 到期前不会返回；按创建时间正序可以避免新候选
+// 长期挤压旧候选。limit 在仓库层再次收紧，防止调用方误传造成一次加载过多数据.
+func (r *gormRepo) GetPendingMemoryCandidates(ctx context.Context, userID int64, limit int, now time.Time) ([]MemoryCandidate, error) {
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
+	var models []ormMemoryCandidate
+	err := r.db.WithContext(ctx).Select(memoryCandidateColumns).
+		Where("user_id = ? AND status = ?", userID, MemoryCandidateStatusPending).
+		Where("deferred_until IS NULL OR deferred_until <= ?", now).
+		Order("created_at ASC, id ASC").
+		Limit(limit).
+		Find(&models).Error
+	if err != nil {
+		return nil, fmt.Errorf("get pending memory candidates: %w", err)
+	}
+	result := make([]MemoryCandidate, 0, len(models))
+	for _, model := range models {
+		result = append(result, memoryCandidateFromORM(model))
+	}
+	return result, nil
+}
+
 // ConfirmMemoryCandidate 把候选状态从 pending 改成 confirmed, 同时写入正式记忆.
 // 这是事务性操作: 改候选状态 + 写 memories, 要么全成功要么全失败.
 // 返回新建的 Memory 记录.
 //
 // 方案 16.11.3 节: memory_candidates 变为 confirmed → memories 新增 active → events 写入 memory_confirmed.
-func (r *sqliteRepo) ConfirmMemoryCandidate(ctx context.Context, id int64, userID int64) (Memory, error) {
+func (r *gormRepo) ConfirmMemoryCandidate(
+	ctx context.Context,
+	id int64,
+	userID int64,
+	expectedRevision int,
+	resolvedBy, deviceID string,
+) (Memory, error) {
 	// 先查出这条候选, 确认它存在且属于这个用户
 	candidate, err := r.GetMemoryCandidate(ctx, id)
 	if err != nil {
@@ -126,11 +156,18 @@ func (r *sqliteRepo) ConfirmMemoryCandidate(ctx context.Context, id int64, userI
 		}
 		// 1. 把候选状态改成 confirmed, 记录 resolved_at
 		now := time.Now()
-		result := tx.Model(&ormMemoryCandidate{}).
-			Where("id = ? AND user_id = ? AND status = ?", id, userID, MemoryCandidateStatusPending).
+		query := tx.Model(&ormMemoryCandidate{}).
+			Where("id = ? AND user_id = ? AND status = ?", id, userID, MemoryCandidateStatusPending)
+		if expectedRevision > 0 {
+			query = query.Where("revision = ?", expectedRevision)
+		}
+		result := query.
 			Updates(map[string]any{
-				"status":      MemoryCandidateStatusConfirmed,
-				"resolved_at": now,
+				"status":             MemoryCandidateStatusConfirmed,
+				"revision":           gorm.Expr("revision + 1"),
+				"resolved_at":        now,
+				"resolved_by":        resolvedBy,
+				"resolved_device_id": deviceID,
 			})
 		if result.Error != nil {
 			return fmt.Errorf("update candidate status: %w", result.Error)
@@ -194,16 +231,29 @@ func (r *sqliteRepo) ConfirmMemoryCandidate(ctx context.Context, id int64, userI
 // RejectMemoryCandidate 把候选状态从 pending 改成 rejected.
 // 拒绝后不写正式记忆, 同一候选不会再次弹出.
 // 方案 16.11.4 节: "用户拒绝候选后, 不因重新登录再次弹出同一候选".
-func (r *sqliteRepo) RejectMemoryCandidate(ctx context.Context, id int64, userID int64) error {
+func (r *gormRepo) RejectMemoryCandidate(
+	ctx context.Context,
+	id int64,
+	userID int64,
+	expectedRevision int,
+	resolvedBy, deviceID string,
+) error {
 	// .Model(&ormMemoryCandidate{}) 指定操作 memory_candidates 表
 	// .Where("id = ? AND status = ?", id, MemoryCandidateStatusPending) 只改 pending 状态的
 	// .Updates(...) 更新 status 和 resolved_at
 	now := time.Now()
-	result := r.db.WithContext(ctx).Model(&ormMemoryCandidate{}).
-		Where("id = ? AND user_id = ? AND status = ?", id, userID, MemoryCandidateStatusPending).
+	query := r.db.WithContext(ctx).Model(&ormMemoryCandidate{}).
+		Where("id = ? AND user_id = ? AND status = ?", id, userID, MemoryCandidateStatusPending)
+	if expectedRevision > 0 {
+		query = query.Where("revision = ?", expectedRevision)
+	}
+	result := query.
 		Updates(map[string]any{
-			"status":      MemoryCandidateStatusRejected,
-			"resolved_at": now,
+			"status":             MemoryCandidateStatusRejected,
+			"revision":           gorm.Expr("revision + 1"),
+			"resolved_at":        now,
+			"resolved_by":        resolvedBy,
+			"resolved_device_id": deviceID,
 		})
 
 	if result.Error != nil {
@@ -222,22 +272,57 @@ func (r *sqliteRepo) RejectMemoryCandidate(ctx context.Context, id int64, userID
 	return nil
 }
 
+// DeferMemoryCandidate 暂缓展示一条 pending 候选.
+// 更新条件同时包含用户、状态和 revision，保证旧页面或另一台设备不能覆盖新决策.
+func (r *gormRepo) DeferMemoryCandidate(
+	ctx context.Context,
+	id int64,
+	userID int64,
+	expectedRevision int,
+	deferredUntil time.Time,
+) (MemoryCandidate, error) {
+	query := r.db.WithContext(ctx).Model(&ormMemoryCandidate{}).
+		Where("id = ? AND user_id = ? AND status = ?", id, userID, MemoryCandidateStatusPending)
+	if expectedRevision > 0 {
+		query = query.Where("revision = ?", expectedRevision)
+	}
+	result := query.Updates(map[string]any{
+		"deferred_until": deferredUntil,
+		"revision":       gorm.Expr("revision + 1"),
+	})
+	if result.Error != nil {
+		return MemoryCandidate{}, fmt.Errorf("defer memory candidate %d: %w", id, result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return MemoryCandidate{}, fmt.Errorf("defer memory candidate %d: stale, resolved, or not found", id)
+	}
+	return r.GetMemoryCandidate(ctx, id)
+}
+
 // memoryCandidateToORM 把业务对象 MemoryCandidate 转成 ORM 模型.
 // string 类型的可空字段转成 *string(空字符串 → nil).
 func memoryCandidateToORM(c MemoryCandidate) ormMemoryCandidate {
+	revision := c.Revision
+	if revision < 1 {
+		revision = 1
+	}
 	return ormMemoryCandidate{
-		ID:         c.ID,
-		UserID:     c.UserID,
-		SessionID:  c.SessionID,
-		TraceID:    stringToPtr(c.TraceID),
-		Content:    c.Content,
-		MemoryType: c.MemoryType,
-		Source:     c.Source,
-		Reason:     c.Reason,
-		UsageHint:  c.UsageHint,
-		Status:     c.Status,
-		CreatedAt:  c.CreatedAt,
-		ResolvedAt: timeToPtr(c.ResolvedAt),
+		ID:               c.ID,
+		UserID:           c.UserID,
+		SessionID:        c.SessionID,
+		TraceID:          stringToPtr(c.TraceID),
+		Content:          c.Content,
+		MemoryType:       c.MemoryType,
+		Source:           c.Source,
+		Reason:           c.Reason,
+		UsageHint:        c.UsageHint,
+		Status:           c.Status,
+		Revision:         revision,
+		DeferredUntil:    timeToPtr(c.DeferredUntil),
+		ResolvedBy:       c.ResolvedBy,
+		ResolvedDeviceID: c.ResolvedDeviceID,
+		CreatedAt:        c.CreatedAt,
+		ResolvedAt:       timeToPtr(c.ResolvedAt),
 	}
 }
 
@@ -245,18 +330,22 @@ func memoryCandidateToORM(c MemoryCandidate) ormMemoryCandidate {
 // 指针字段转成普通类型: nil → 零值.
 func memoryCandidateFromORM(m ormMemoryCandidate) MemoryCandidate {
 	return MemoryCandidate{
-		ID:         m.ID,
-		UserID:     m.UserID,
-		SessionID:  m.SessionID,
-		TraceID:    ptrToString(m.TraceID),
-		Content:    m.Content,
-		MemoryType: m.MemoryType,
-		Source:     m.Source,
-		Reason:     m.Reason,
-		UsageHint:  m.UsageHint,
-		Status:     m.Status,
-		CreatedAt:  m.CreatedAt,
-		ResolvedAt: ptrToTime(m.ResolvedAt),
+		ID:               m.ID,
+		UserID:           m.UserID,
+		SessionID:        m.SessionID,
+		TraceID:          ptrToString(m.TraceID),
+		Content:          m.Content,
+		MemoryType:       m.MemoryType,
+		Source:           m.Source,
+		Reason:           m.Reason,
+		UsageHint:        m.UsageHint,
+		Status:           m.Status,
+		Revision:         m.Revision,
+		DeferredUntil:    ptrToTime(m.DeferredUntil),
+		ResolvedBy:       m.ResolvedBy,
+		ResolvedDeviceID: m.ResolvedDeviceID,
+		CreatedAt:        m.CreatedAt,
+		ResolvedAt:       ptrToTime(m.ResolvedAt),
 	}
 }
 

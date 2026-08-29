@@ -29,7 +29,7 @@ import (
 // TableName 指定 model_usage_daily 表名。
 func (ormModelUsageDaily) TableName() string { return "model_usage_daily" }
 
-func (r *sqliteRepo) UpsertModelUsageDaily(ctx context.Context, usage ModelUsage) error {
+func (r *gormRepo) UpsertModelUsageDaily(ctx context.Context, usage ModelUsage) error {
 	// 从 occurred_at 提取日期部分(YYYY-MM-DD), 转成 UTC 避免时区问题
 	dateStr := usage.OccurredAt.UTC().Format("2006-01-02")
 
@@ -85,7 +85,7 @@ func (r *sqliteRepo) UpsertModelUsageDaily(ctx context.Context, usage ModelUsage
 // GetDailyUsage 按日期范围查日聚合数据, 供看板查询.
 // dateFrom 和 dateTo 格式为 YYYY-MM-DD, 返回按日期倒序排列的记录.
 // 方案 15.7 节: 看板由 Go 服务端提供只读聚合接口, 不允许前端直接连数据库.
-func (r *sqliteRepo) GetDailyUsage(ctx context.Context, dateFrom, dateTo string) ([]ModelUsageDaily, error) {
+func (r *gormRepo) GetDailyUsage(ctx context.Context, dateFrom, dateTo string) ([]ModelUsageDaily, error) {
 	var rows []ormModelUsageDaily
 
 	// 查询条件: date 在指定范围内, 按日期倒序排列.

@@ -26,7 +26,7 @@ import (
 // TableName 指定 model_price_snapshots 表名。
 func (ormModelPriceSnapshot) TableName() string { return "model_price_snapshots" }
 
-func (r *sqliteRepo) GetPriceSnapshot(ctx context.Context, provider, model string, at time.Time) (ModelPriceSnapshot, error) {
+func (r *gormRepo) GetPriceSnapshot(ctx context.Context, provider, model string, at time.Time) (ModelPriceSnapshot, error) {
 	var orm ormModelPriceSnapshot
 
 	// 查询条件: provider 和 model 匹配, effective_from <= 指定时间, 按 effective_from 倒序取第一条.

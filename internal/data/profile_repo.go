@@ -35,7 +35,7 @@ func (ormDialogueTag) TableName() string { return "dialogue_tags" }
 
 // InsertDialogueTag 创建一条对话标签明细.
 // 执行完 GORM 自动回填 ID 和 CreatedAt.
-func (r *sqliteRepo) InsertDialogueTag(ctx context.Context, tag DialogueTag) (DialogueTag, error) {
+func (r *gormRepo) InsertDialogueTag(ctx context.Context, tag DialogueTag) (DialogueTag, error) {
 	model := dialogueTagToORM(tag)
 
 	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
@@ -58,7 +58,7 @@ func (r *sqliteRepo) InsertDialogueTag(ctx context.Context, tag DialogueTag) (Di
 }
 
 // GetDialogueTags 按用户 ID 查标签明细, 按时间倒序, 限制条数.
-func (r *sqliteRepo) GetDialogueTags(ctx context.Context, userID int64, limit int) ([]DialogueTag, error) {
+func (r *gormRepo) GetDialogueTags(ctx context.Context, userID int64, limit int) ([]DialogueTag, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -81,7 +81,7 @@ func (r *sqliteRepo) GetDialogueTags(ctx context.Context, userID int64, limit in
 
 // CountDialogueTagsByUser 统计用户当前的对话轮数 (最大的 round 值).
 // 返回 0 表示该用户还没有标签记录.
-func (r *sqliteRepo) CountDialogueTagsByUser(ctx context.Context, userID int64) (int, error) {
+func (r *gormRepo) CountDialogueTagsByUser(ctx context.Context, userID int64) (int, error) {
 	var maxRound int
 	err := r.db.WithContext(ctx).Model(&ormDialogueTag{}).
 		Where("user_id = ?", userID).
@@ -136,7 +136,7 @@ func (ormTagStatistic) TableName() string { return "tag_statistics" }
 
 // UpsertTagStatistic UPSERT 一条按天聚合的标签统计.
 // 复合主键 (user_id, tag_dim, tag_value, period) 冲突时累加 hit_count 并更新 last_round.
-func (r *sqliteRepo) UpsertTagStatistic(ctx context.Context, stat TagStatistic) error {
+func (r *gormRepo) UpsertTagStatistic(ctx context.Context, stat TagStatistic) error {
 	model := ormTagStatistic{
 		UserID:    stat.UserID,
 		TagDim:    stat.TagDim,
@@ -180,7 +180,7 @@ func (r *sqliteRepo) UpsertTagStatistic(ctx context.Context, stat TagStatistic) 
 // GetTagStatistics 查标签统计.
 // tagDim 不为空时只查指定维度, 为空时查所有维度.
 // since > 0 时只查 last_round > since 的记录, 否则查全部.
-func (r *sqliteRepo) GetTagStatistics(ctx context.Context, userID int64, tagDim string, since int) ([]TagStatistic, error) {
+func (r *gormRepo) GetTagStatistics(ctx context.Context, userID int64, tagDim string, since int) ([]TagStatistic, error) {
 	query := r.db.WithContext(ctx).Select(tagStatisticColumns).
 		Where("user_id = ?", userID)
 
@@ -226,7 +226,7 @@ func tagStatisticFromORM(m ormTagStatistic) TagStatistic {
 func (ormEmotionSession) TableName() string { return "emotion_sessions" }
 
 // InsertEmotionSession 创建一条情绪持续段.
-func (r *sqliteRepo) InsertEmotionSession(ctx context.Context, session EmotionSession) (EmotionSession, error) {
+func (r *gormRepo) InsertEmotionSession(ctx context.Context, session EmotionSession) (EmotionSession, error) {
 	model := emotionSessionToORM(session)
 
 	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
@@ -248,7 +248,7 @@ func (r *sqliteRepo) InsertEmotionSession(ctx context.Context, session EmotionSe
 
 // UpdateEmotionSession 更新一条情绪持续段 (延长或结束).
 // fields 是要更新的字段映射, 比如 {"end_round": 10, "end_at": now, "duration_minutes": 5.2}.
-func (r *sqliteRepo) UpdateEmotionSession(ctx context.Context, id int64, fields map[string]any) error {
+func (r *gormRepo) UpdateEmotionSession(ctx context.Context, id int64, fields map[string]any) error {
 	result := r.db.WithContext(ctx).Model(&ormEmotionSession{}).
 		Where("id = ?", id).
 		Updates(fields)
@@ -274,7 +274,7 @@ func (r *sqliteRepo) UpdateEmotionSession(ctx context.Context, id int64, fields 
 // GetLatestEmotionSession 取用户最近一条情绪持续段.
 // 可能是进行中的 (end_at IS NULL) 或已结束的.
 // 查不到返回 sql.ErrNoRows.
-func (r *sqliteRepo) GetLatestEmotionSession(ctx context.Context, userID int64) (EmotionSession, error) {
+func (r *gormRepo) GetLatestEmotionSession(ctx context.Context, userID int64) (EmotionSession, error) {
 	var model ormEmotionSession
 	if err := r.db.WithContext(ctx).Select(emotionSessionColumns).
 		Where("user_id = ?", userID).
@@ -288,7 +288,7 @@ func (r *sqliteRepo) GetLatestEmotionSession(ctx context.Context, userID int64) 
 // GetEmotionSessions 查情绪持续段列表.
 // since > 0 时只查 start_round > since 的记录, 否则查全部.
 // limit 限制返回条数, 0 或负数用默认值 50.
-func (r *sqliteRepo) GetEmotionSessions(ctx context.Context, userID int64, since int, limit int) ([]EmotionSession, error) {
+func (r *gormRepo) GetEmotionSessions(ctx context.Context, userID int64, since int, limit int) ([]EmotionSession, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -363,7 +363,7 @@ func (ormUserProfile) TableName() string { return "user_profiles" }
 
 // GetUserProfile 按用户 ID 查画像.
 // 查不到返回 sql.ErrNoRows.
-func (r *sqliteRepo) GetUserProfile(ctx context.Context, userID int64) (UserProfile, error) {
+func (r *gormRepo) GetUserProfile(ctx context.Context, userID int64) (UserProfile, error) {
 	var model ormUserProfile
 	if err := r.db.WithContext(ctx).Select(userProfileColumns).
 		Where("user_id = ?", userID).
@@ -375,7 +375,7 @@ func (r *sqliteRepo) GetUserProfile(ctx context.Context, userID int64) (UserProf
 
 // UpsertUserProfile 创建或更新用户画像.
 // user_profiles 表对 user_id 有唯一索引, 冲突时更新所有字段.
-func (r *sqliteRepo) UpsertUserProfile(ctx context.Context, profile UserProfile) (UserProfile, error) {
+func (r *gormRepo) UpsertUserProfile(ctx context.Context, profile UserProfile) (UserProfile, error) {
 	now := time.Now()
 	model := ormUserProfile{
 		ID:             profile.ID,
@@ -390,10 +390,10 @@ func (r *sqliteRepo) UpsertUserProfile(ctx context.Context, profile UserProfile)
 	result := r.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "user_id"}},
 		DoUpdates: clause.Assignments(map[string]any{
-			"profile_json":     gorm.Expr("excluded.profile_json"),
-			"analyzed_rounds":  gorm.Expr("excluded.analyzed_rounds"),
-			"analysis_count":   gorm.Expr("excluded.analysis_count"),
-			"updated_at":       gorm.Expr("excluded.updated_at"),
+			"profile_json":    gorm.Expr("excluded.profile_json"),
+			"analyzed_rounds": gorm.Expr("excluded.analyzed_rounds"),
+			"analysis_count":  gorm.Expr("excluded.analysis_count"),
+			"updated_at":      gorm.Expr("excluded.updated_at"),
 		}),
 	}).Create(&model)
 
@@ -434,7 +434,7 @@ func userProfileFromORM(m ormUserProfile) UserProfile {
 func (ormReminder) TableName() string { return "reminders" }
 
 // InsertReminder 创建一条待办提醒.
-func (r *sqliteRepo) InsertReminder(ctx context.Context, reminder Reminder) (Reminder, error) {
+func (r *gormRepo) InsertReminder(ctx context.Context, reminder Reminder) (Reminder, error) {
 	model := reminderToORM(reminder)
 
 	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
@@ -454,7 +454,7 @@ func (r *sqliteRepo) InsertReminder(ctx context.Context, reminder Reminder) (Rem
 
 // GetReminders 按用户 ID 和状态查提醒列表.
 // status 为空时查所有状态, 按提醒时间升序返回.
-func (r *sqliteRepo) GetReminders(ctx context.Context, userID int64, status string) ([]Reminder, error) {
+func (r *gormRepo) GetReminders(ctx context.Context, userID int64, status string) ([]Reminder, error) {
 	query := r.db.WithContext(ctx).Select(reminderColumns).
 		Where("user_id = ?", userID)
 
@@ -478,7 +478,7 @@ func (r *sqliteRepo) GetReminders(ctx context.Context, userID int64, status stri
 
 // GetReminder 按 ID 查一条提醒.
 // 查不到返回 sql.ErrNoRows.
-func (r *sqliteRepo) GetReminder(ctx context.Context, id int64) (Reminder, error) {
+func (r *gormRepo) GetReminder(ctx context.Context, id int64) (Reminder, error) {
 	var model ormReminder
 	if err := r.db.WithContext(ctx).Select(reminderColumns).
 		First(&model, id).Error; err != nil {
@@ -489,7 +489,7 @@ func (r *sqliteRepo) GetReminder(ctx context.Context, id int64) (Reminder, error
 
 // UpdateReminder 更新一条提醒 (改状态/改时间/改内容).
 // fields 是要更新的字段映射, 比如 {"status": "delivered", "delivered_at": now}.
-func (r *sqliteRepo) UpdateReminder(ctx context.Context, id int64, fields map[string]any) error {
+func (r *gormRepo) UpdateReminder(ctx context.Context, id int64, fields map[string]any) error {
 	result := r.db.WithContext(ctx).Model(&ormReminder{}).
 		Where("id = ?", id).
 		Updates(fields)
@@ -515,7 +515,7 @@ func (r *sqliteRepo) UpdateReminder(ctx context.Context, id int64, fields map[st
 // GetPendingRemindersDue 查已到期但尚未投递的提醒.
 // 条件: status = 'pending' AND remind_at <= now.
 // 用于后台定时扫描, 把到期提醒投递给用户.
-func (r *sqliteRepo) GetPendingRemindersDue(ctx context.Context, now time.Time) ([]Reminder, error) {
+func (r *gormRepo) GetPendingRemindersDue(ctx context.Context, now time.Time) ([]Reminder, error) {
 	var models []ormReminder
 	if err := r.db.WithContext(ctx).Select(reminderColumns).
 		Where("status = ? AND remind_at <= ?", ReminderStatusPending, now).

@@ -51,7 +51,7 @@ type Config struct {
 	Server ServerConfig `toml:"server"`
 	// LLM 对应 [llm] 段,放大模型连接配置(地址,密钥,模型名)
 	LLM LLMConfig `toml:"llm"`
-	// Database 对应 [database] 段,放数据库路径和迁移目录
+	// Database 对应 [database] 段,放 PostgreSQL 连接和迁移目录
 	Database DatabaseConfig `toml:"database"`
 	// Auth 对应 [auth] 段,放身份鉴权配置(比如主人令牌)
 	Auth AuthConfig `toml:"auth"`
@@ -61,6 +61,8 @@ type Config struct {
 	Metrics MetricsConfig `toml:"metrics"`
 	// Log 对应 [log] 段，控制统一日志最低级别和本地目录。
 	Log LogConfig `toml:"log"`
+	// OTel 对应 [otel] 段；只在 production 环境启用 OTLP 日志上报。
+	OTel OTelConfig `toml:"otel"`
 	// Memory 对应 [memory] 段,放长期记忆安全配置.
 	Memory MemoryConfig `toml:"memory"`
 	// ASR 对应 [asr] 段, 放语音识别 (ASR) 配置.
@@ -95,6 +97,13 @@ type LogConfig struct {
 	Compress   *bool  `toml:"compress"`     // 是否 gzip 压缩旧日志；指针用于区分未配置和 false
 }
 
+// OTelConfig 控制生产环境的标准 OTLP/gRPC 日志出口。
+// development 环境会无条件忽略这组配置，不创建 exporter，也不发起网络连接。
+type OTelConfig struct {
+	Endpoint string `toml:"endpoint"` // Alloy/Collector OTLP gRPC 地址，例如 localhost:4317
+	Insecure *bool  `toml:"insecure"` // 本地明文接收端设为 true；生产 TLS 接收端设为 false
+}
+
 // AppConfig 放应用级配置(运行环境等).
 type AppConfig struct {
 	// environment 运行环境,只能是 development(开发)或 production(生产)
@@ -123,16 +132,17 @@ type LLMConfig struct {
 	BaseURL string `toml:"base_url"` // LLM 服务的 API 基础地址,如 "https://api.openai.com/v1"
 	// APIKey 是调 LLM 用的密钥
 	// 允许在配置文件里留空,因为运行时会从数据库加密配置里补充
-	APIKey string `toml:"api_key"` // 调用 LLM 用的密钥,允许在配置文件中为空(由数据库加密配置补充)
+	APIKey string `toml:"-"` // 仅由 PostgreSQL encrypted_secrets 注入
 	// Model 是默认用的模型名,比如 "gpt-4o","deepseek-chat"
 	Model string `toml:"model"` // 默认模型名,如 "gpt-4o"
 }
 
 // DatabaseConfig 放数据库连接配置.
 type DatabaseConfig struct {
-	// Path 是 SQLite 数据库文件的路径,比如 "data/swallow.db"
-	// 数据库引擎根据这个路径打开或创建 .db 文件
-	Path string `toml:"path"` // SQLite 数据库文件路径
+	// DSN 是 PostgreSQL 连接串。密钥只放在不会提交的 config.local.toml 中。
+	DSN string `toml:"dsn"`
+	// MasterKeyPath 是数据库敏感配置的本地主密钥文件路径。
+	MasterKeyPath string `toml:"master_key_path"`
 	// MigrationsDir 是版本化 SQL 迁移文件所在的目录,比如 "script/migrations"
 	// 迁移器启动时从这个目录加载所有 NNNN_name.sql 文件
 	MigrationsDir string `toml:"migrations_dir"` // 版本化 SQL 迁移文件所在目录
@@ -175,7 +185,7 @@ type ASRConfig struct {
 	// 不同 Provider 会自行追加 chat/completions 或 audio/transcriptions。
 	BaseURL string `toml:"base_url"` // ASR 服务的 API 基础地址
 	// APIKey 是调 ASR 用的密钥
-	APIKey string `toml:"api_key"` // ASR API 密钥
+	APIKey string `toml:"-"` // 仅由 PostgreSQL encrypted_secrets 注入
 	// Model 是 ASR 模型名，如 qwen3-asr-flash。
 	Model string `toml:"model"` // ASR 模型名
 	// Language 是旧版平铺配置的语种提示；auto 表示自动检测。
@@ -193,21 +203,20 @@ type ASRConfig struct {
 // 各供应商分别保存地址、密钥和模型，provider 只负责选择，不复制配置。
 type ASRProviderConfig struct {
 	BaseURL   string `toml:"base_url"`
-	APIKey    string `toml:"api_key"`
+	APIKey    string `toml:"-"`
 	Model     string `toml:"model"`
 	Language  string `toml:"language"`   // auto 表示让模型自动检测
 	EnableITN bool   `toml:"enable_itn"` // 数字、日期等口语结果书面化
 }
 
 // TTSConfig 放语音合成 (TTS) 服务配置.
-// 支持五种 provider:
-//   - cosyvoice: 本地 CosyVoice2 (tts_server.py), GPU 推理, 支持流式, 低延迟
+// 支持四种云端 provider:
 //   - siliconflow: 硅基流动 TTS, HTTP POST, 支持 API 级流式, 需要 api_key (国内直连)
 //   - edge: 微软 edge-tts, 走 WebSocket, 不需要 api_key (国内不稳定, 不支持流式)
 //   - zhipu: 智谱 GLM-TTS, 支持官方音色和 GLM-TTS-Clone 私有音色
 //   - aliyun: 阿里云百炼 CosyVoice WebSocket, 双向流式、低首包延迟
 type TTSConfig struct {
-	// Provider 是 TTS 供应商名称: cosyvoice、siliconflow、aliyun、zhipu 或 edge。
+	// Provider 是 TTS 供应商名称: siliconflow、aliyun、zhipu 或 edge。
 	Provider string `toml:"provider"` // TTS 供应商名称
 	// Aliyun 是阿里云百炼实时 TTS 的独立配置，不与硅基流动密钥混用。
 	Aliyun TTSProviderConfig `toml:"aliyun"`
@@ -216,7 +225,7 @@ type TTSConfig struct {
 	BaseURL string `toml:"base_url"` // TTS 服务的 API 基础地址
 	// APIKey 是调 TTS 用的密钥 (siliconflow 用, edge 不需要)
 	// 只从 TOML 读, 不 seed 到数据库 (和 ASR 一样)
-	APIKey string `toml:"api_key"` // TTS API 密钥
+	APIKey string `toml:"-"` // 仅由 PostgreSQL encrypted_secrets 注入
 	// Model 是 TTS 模型名 (siliconflow 用, edge 不需要)
 	// 如 "FunAudioLLM/CosyVoice2-0.5B"
 	Model string `toml:"model"` // TTS 模型名
@@ -262,31 +271,13 @@ type TTSConfig struct {
 	// Pitch 是音调 (edge 用), 如 "+0Hz", "-50Hz"
 	Pitch string `toml:"pitch"` // 音调 (edge-tts)
 
-	// CosyVoiceBaseURL 是本地 CosyVoice2 TTS 服务 (tts_server.py) 的地址.
-	// provider = "cosyvoice" 时使用, 如 "http://127.0.0.1:9880".
-	// tts_server.py 需单独启动 (GPU 推理服务), Go 通过 HTTP 调用它.
-	CosyVoiceBaseURL string `toml:"cosyvoice_base_url"` // 本地 CosyVoice2 TTS 服务地址
-
-	// CosyVoiceModelDir 是 CosyVoice2 模型目录路径.
-	// 如 "models/cosyvoice2" 或绝对路径.
-	CosyVoiceModelDir string `toml:"cosyvoice_model_dir"` // CosyVoice2 模型目录
-
-	// CosyVoiceRefWav 是声音克隆参考音频路径.
-	// 如 "data/voice_ref.wav" 或绝对路径.
-	CosyVoiceRefWav string `toml:"cosyvoice_ref_wav"` // 参考音频路径
-
-	// CosyVoiceRefText 是参考音频的转录文本.
-	CosyVoiceRefText string `toml:"cosyvoice_ref_text"` // 参考音频转录文本
-
-	// CosyVoicePort 是 tts_server.py 监听端口, 默认 9880.
-	CosyVoicePort int `toml:"cosyvoice_port"` // tts_server.py 监听端口
 }
 
 // TTSProviderConfig 保存一个远程 TTS 供应商的连接参数。
 // 独立配置可以避免切换 provider 时误把其他平台的密钥发送出去。
 type TTSProviderConfig struct {
 	BaseURL     string  `toml:"base_url"`
-	APIKey      string  `toml:"api_key"`
+	APIKey      string  `toml:"-"`
 	WorkspaceID string  `toml:"workspace_id"`
 	Model       string  `toml:"model"`
 	Voice       string  `toml:"voice"`

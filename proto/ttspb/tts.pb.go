@@ -31,7 +31,9 @@ type SynthesizeRequest struct {
 	Tone string `protobuf:"bytes,2,opt,name=tone,proto3" json:"tone,omitempty"`
 	// 设备 ID, 从 gRPC metadata 的 Authorization 头解析, 用于日志.
 	// 不需要客户端显式传, 这里保留用于服务端日志关联.
-	DeviceId      string `protobuf:"bytes,3,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	DeviceId string `protobuf:"bytes,3,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	// LLM 规划的语速倍率，服务端转换为供应商原生韵律指令；0 表示默认 1.0。
+	SpeakingRate  float64 `protobuf:"fixed64,4,opt,name=speaking_rate,json=speakingRate,proto3" json:"speaking_rate,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -85,6 +87,13 @@ func (x *SynthesizeRequest) GetDeviceId() string {
 		return x.DeviceId
 	}
 	return ""
+}
+
+func (x *SynthesizeRequest) GetSpeakingRate() float64 {
+	if x != nil {
+		return x.SpeakingRate
+	}
+	return 0
 }
 
 // 非流式合成响应.
@@ -203,11 +212,12 @@ var File_tts_proto protoreflect.FileDescriptor
 
 const file_tts_proto_rawDesc = "" +
 	"\n" +
-	"\ttts.proto\x12\vswallow.tts\"X\n" +
+	"\ttts.proto\x12\vswallow.tts\"}\n" +
 	"\x11SynthesizeRequest\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12\x12\n" +
 	"\x04tone\x18\x02 \x01(\tR\x04tone\x12\x1b\n" +
-	"\tdevice_id\x18\x03 \x01(\tR\bdeviceId\"V\n" +
+	"\tdevice_id\x18\x03 \x01(\tR\bdeviceId\x12#\n" +
+	"\rspeaking_rate\x18\x04 \x01(\x01R\fspeakingRate\"V\n" +
 	"\x12SynthesizeResponse\x12\x1d\n" +
 	"\n" +
 	"audio_data\x18\x01 \x01(\fR\taudioData\x12!\n" +

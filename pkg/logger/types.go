@@ -39,11 +39,14 @@ type gormLogger struct{}
 
 // Options 是日志初始化参数，由 TOML 的 app 和 log 配置组装。
 type Options struct {
-	Environment string // development 或 production，控制敏感 SQL 是否允许输出
-	Level       string // debug、info、warn 或 error
-	Directory   string // 本地日志文件目录
-	MaxSizeMB   int    // 单个日志文件轮转大小，单位 MB
-	MaxBackups  int    // 最多保留的旧日志数量
-	MaxAgeDays  int    // 旧日志保留天数
-	Compress    bool   // 是否 gzip 压缩轮转后的旧日志
+	Environment  string // development 或 production，控制敏感 SQL 是否允许输出
+	Level        string // debug、info、warn 或 error
+	Directory    string // 本地日志文件目录
+	MaxSizeMB    int    // 单个日志文件轮转大小，单位 MB
+	MaxBackups   int    // 最多保留的旧日志数量
+	MaxAgeDays   int    // 旧日志保留天数
+	Compress     bool   // 是否 gzip 压缩轮转后的旧日志
+	OTLPEndpoint string // production 环境的 OTLP/gRPC 日志接收地址
+	OTLPInsecure bool   // 是否使用明文 gRPC
+	ServiceName  string // OTel resource 的 service.name
 }

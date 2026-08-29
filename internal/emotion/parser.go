@@ -14,6 +14,7 @@ package emotion
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 
 	"github.com/swallow-sun/swallow-go/pkg/logger"
@@ -48,6 +49,7 @@ func ParseTags(content string) (ParsedTags, bool) {
 		return ParsedTags{}, false
 	}
 
+	tags = CanonicalizeTags(tags)
 	logger.Info("ParseTags: tags parsed",
 		zap.String("emotion", tags.Emotion),
 		zap.Float64("intensity", tags.Intensity),
@@ -56,6 +58,8 @@ func ParseTags(content string) (ParsedTags, bool) {
 		zap.String("trigger", tags.Trigger),
 		zap.String("assistant_tone", tags.AssistantTone),
 		zap.Float64("speaking_rate", tags.SpeakingRate),
+		zap.String("scene", tags.Scene),
+		zap.Int("performance_actions", len(tags.Performance.Actions)),
 	)
 
 	return tags, true
@@ -93,7 +97,8 @@ func parseTagsContent(content string) (ParsedTags, int, bool) {
 			_, hasEmotion := fields["emotion"]
 			_, hasTone := fields["assistant_tone"]
 			_, hasRate := fields["speaking_rate"]
-			if hasEmotion || hasTone || hasRate {
+			_, hasPerformance := fields["performance"]
+			if hasEmotion || hasTone || hasRate || hasPerformance {
 				var tags ParsedTags
 				if err := json.Unmarshal([]byte(candidate), &tags); err == nil {
 					return tags, jsonStart, true
@@ -103,4 +108,79 @@ func parseTagsContent(content string) (ParsedTags, int, bool) {
 		searchEnd = jsonStart
 	}
 	return ParsedTags{}, 0, false
+}
+
+var allowedScenes = map[string]bool{
+	"idle": true, "conversation": true, "comfort": true, "celebration": true,
+	"explanation": true, "apology": true, "warning": true, "farewell": true,
+}
+var allowedPostures = map[string]bool{
+	"neutral": true, "open": true, "lean_in": true, "reserved": true,
+	"confident": true, "relaxed": true,
+}
+var allowedGazes = map[string]bool{
+	"user": true, "away": true, "down": true, "up": true, "side": true,
+}
+var allowedActions = map[string]bool{
+	"nod": true, "shake_head": true, "wave": true, "bow": true,
+	"hand_to_chest": true, "open_hands": true, "point": true,
+	"shrug": true, "cheer": true, "step_in": true, "step_back": true,
+	"sway": true, "think": true, "weight_shift": true, "look_around": true,
+	"laugh": true, "dance": true, "surprise": true, "listen": true,
+	"explain": true,
+}
+
+func clamp01(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+// CanonicalizeTags 把模型输出收敛到客户端支持的有限动作协议。
+func CanonicalizeTags(tags ParsedTags) ParsedTags {
+	tags.Intensity = clamp01(tags.Intensity)
+	if tags.SpeakingRate == 0 {
+		tags.SpeakingRate = 1
+	}
+	if tags.SpeakingRate < 0.8 {
+		tags.SpeakingRate = 0.8
+	}
+	if tags.SpeakingRate > 1.2 {
+		tags.SpeakingRate = 1.2
+	}
+	if !allowedScenes[tags.Scene] {
+		tags.Scene = "conversation"
+	}
+	if !allowedPostures[tags.Performance.Posture] {
+		tags.Performance.Posture = "neutral"
+	}
+	if !allowedGazes[tags.Performance.Gaze] {
+		tags.Performance.Gaze = "user"
+	}
+	tags.Performance.Energy = clamp01(tags.Performance.Energy)
+	valid := make([]PerformanceAction, 0, len(tags.Performance.Actions))
+	for _, action := range tags.Performance.Actions {
+		if len(valid) >= 6 || !allowedActions[action.Type] {
+			continue
+		}
+		action.Start = clamp01(action.Start)
+		action.Duration = clamp01(action.Duration)
+		if action.Duration < 0.08 {
+			action.Duration = 0.08
+		}
+		if action.Start+action.Duration > 1 {
+			action.Duration = 1 - action.Start
+		}
+		if action.Duration <= 0 {
+			continue
+		}
+		action.Intensity = clamp01(action.Intensity)
+		valid = append(valid, action)
+	}
+	tags.Performance.Actions = valid
+	return tags
 }

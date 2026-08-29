@@ -89,5 +89,5 @@ func NewSQLite(dbPath, migrationsDir string) (Repository, error) {
 
 	// 返回 sqliteRepo 实例,指针包在 Repository 接口里
 	// sqliteRepo 里就一个字段 db,所以后面所有方法都靠它来操作数据库
-	return &sqliteRepo{db: db}, nil
+	return &gormRepo{db: db}, nil
 }

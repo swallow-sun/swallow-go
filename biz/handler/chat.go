@@ -209,6 +209,15 @@ func (d *Deps) chatForUser(
 				}
 			}
 
+		case service.ChatEventPerformance:
+			if event.Performance != nil {
+				if err := writeSSE(c, "performance", event.Performance); err != nil {
+					status = metrics.StatusCancelled
+					logger.Error("failed to send SSE performance event", zap.Error(err), zap.String("trace_id", event.TraceID))
+					return
+				}
+			}
+
 		case service.ChatEventDone:
 			// 正常结束: 所有回答片段都发完了, 发一个空的 done 事件告诉客户端"完了"
 			// data 是空 map, 因为 done 事件不需要带数据
