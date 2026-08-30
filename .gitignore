@@ -37,8 +37,7 @@ _testmain.go
 /.tmp/
 .hz
 
-# 本地项目文档和测试代码不提交到远程仓库
-/README.md
+# 本地专项文档和测试代码不提交到远程仓库；仓库根 README.md 必须提交
 /docs/
 *_test.go
 /script/migrations/README.md
